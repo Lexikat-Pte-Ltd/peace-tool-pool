@@ -1,0 +1,32 @@
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Runtime caches and local data
+.cache/
+data/**
+!data/.gitkeep
+artifacts/
+runs/
+
+# PEACE local assets. Keep placeholders, but avoid committing models/data by accident.
+models.zip
+dependencies/models/**
+!dependencies/models/.gitkeep
+dependencies/ultralytics/

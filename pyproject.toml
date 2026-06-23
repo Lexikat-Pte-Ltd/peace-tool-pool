@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "peace-tool-pool"
+version = "0.0.0"
+description = "Portable extraction scaffold for the PEACE GeoMap-Agent tool pool."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dependencies = []
+
+[project.optional-dependencies]
+detectors = [
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "pillow==11.0.0",
+    "torch==2.0.1",
+    "torchvision==0.15.2",
+]
+mcp = [
+    "mcp>=1.0,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.8,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/peace_tool_pool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.uv]
+package = true
+default-groups = []

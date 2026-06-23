@@ -48,20 +48,37 @@ The default environment stays lightweight. Install extras only for the tool fami
 | `uv sync --extra mcp`              | Future MCP server surface.           |
 | `uv sync --all-extras --group dev` | Full local development environment.  |
 
-## Dependencies
+## Local Assets
 
-The PEACE README documents detector weight download via Google Drive:
+Install the detector weights with the local bootstrap script:
 
 ```bash
-uvx --from gdown gdown https://drive.google.com/uc?id=1f7dUdfA_W8He9czG6SoYQBmUsSPrA6MZ
-unzip models.zip -d dependencies
+bash scripts/install_layout_models.sh
 ```
+
+The script uses `uvx --from gdown gdown` as a transient dependency and extracts the
+downloaded archive into `dependencies/` with Python's standard library.
 
 Expected local asset paths after bootstrap:
 
 ```text
 dependencies/models/det_component/weights/best.pt
 dependencies/models/det_legend/weights/best.pt
+```
+
+Install a tiny set of USGS example maps from the Hugging Face dataset without cloning
+the full benchmark repository:
+
+```bash
+bash scripts/download_usgs_examples.sh --count 5
+```
+
+This writes files under `data/peace/usgs_images/` and uses `huggingface_hub` as a
+transient `uv` dependency. The full `usgs_images/` folder is about 52.6 MB, so it can
+also be installed without `git-lfs` when needed:
+
+```bash
+bash scripts/download_usgs_examples.sh --all
 ```
 
 ## Environment Variables

@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .errors import OptionalDependencyError
 from .types import BBox, LegendEntry, normalize_bbox
+
+
+DETECTION_BOX_COLORS_RGB: dict[str, tuple[int, int, int]] = {
+    "title": (37, 99, 235),
+    "main_map": (22, 163, 74),
+    "legend": (245, 158, 11),
+    "scale": (147, 51, 234),
+    "index_map": (8, 145, 178),
+    "cross_section": (220, 38, 38),
+    "stratigraphic_column": (219, 39, 119),
+    "others": (71, 85, 105),
+}
 
 
 def require_cv2() -> Any:
@@ -75,6 +87,89 @@ def save_image(path: str | Path, image: Any) -> None:
 
 def crop_and_save_image(image: Any, bbox: BBox, cropped_image_path: str | Path) -> None:
     save_image(cropped_image_path, crop_image(image, bbox))
+
+
+def _rgb_to_bgr(color: Sequence[int]) -> tuple[int, int, int]:
+    return int(color[2]), int(color[1]), int(color[0])
+
+
+def _text_color_for_background(rgb_color: Sequence[int]) -> tuple[int, int, int]:
+    luminance = 0.299 * rgb_color[0] + 0.587 * rgb_color[1] + 0.114 * rgb_color[2]
+    return (0, 0, 0) if luminance > 150 else (255, 255, 255)
+
+
+def annotate_detections_on_image(
+    image: Any,
+    detections_by_label: Mapping[str, Sequence[Any]],
+    output_path: str | Path,
+) -> None:
+    if isinstance(image, (str, Path)):
+        image = read_image(image)
+    cv2 = require_cv2()
+    height, width = image.shape[:2]
+    annotated = image.copy()
+    thickness = max(2, round(min(width, height) / 500))
+    font_scale = max(0.45, min(width, height) / 1400)
+    font_thickness = max(1, thickness - 1)
+    padding = max(3, thickness + 1)
+
+    for label, detections in detections_by_label.items():
+        rgb_color = DETECTION_BOX_COLORS_RGB.get(label, DETECTION_BOX_COLORS_RGB["others"])
+        box_color = _rgb_to_bgr(rgb_color)
+        text_color = _text_color_for_background(rgb_color)
+        for detection in detections:
+            bbox = getattr(detection, "bbox", detection)
+            confidence = getattr(detection, "confidence", None)
+            x0, y0, x1, y1 = clip_bbox(normalize_bbox(bbox), width, height)
+            cv2.rectangle(
+                annotated,
+                (x0, y0),
+                (x1, y1),
+                box_color,
+                thickness=thickness,
+                lineType=cv2.LINE_AA,
+            )
+
+            caption = label.replace("_", " ")
+            if confidence is not None:
+                caption = f"{caption} {confidence:.2f}"
+            (text_width, text_height), baseline = cv2.getTextSize(
+                caption,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                font_thickness,
+            )
+            label_width = min(width, text_width + padding * 2)
+            label_height = text_height + baseline + padding * 2
+            label_x0 = min(x0, max(0, width - label_width))
+            label_x1 = min(width, label_x0 + label_width)
+            if y0 - label_height >= 0:
+                label_y0 = y0 - label_height
+                label_y1 = y0
+                text_y = y0 - baseline - padding
+            else:
+                label_y0 = y0
+                label_y1 = min(height, y0 + label_height)
+                text_y = min(height - padding - baseline, y0 + padding + text_height)
+
+            cv2.rectangle(
+                annotated,
+                (label_x0, label_y0),
+                (label_x1, label_y1),
+                box_color,
+                thickness=-1,
+            )
+            cv2.putText(
+                annotated,
+                caption,
+                (label_x0 + padding, max(text_height, text_y)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                text_color,
+                thickness=font_thickness,
+                lineType=cv2.LINE_AA,
+            )
+    save_image(output_path, annotated)
 
 
 def crop_corners_and_save_image(

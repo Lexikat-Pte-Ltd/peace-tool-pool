@@ -59,5 +59,22 @@ def test_service_processes_image_and_writes_peace_metadata(tmp_path):
 
     metadata_path = config.cache_namespace_root / "meta" / "sample.json"
     crop_path = config.cache_namespace_root / "det" / "sample" / "main_map_0.png"
+    overlay_path = config.cache_namespace_root / "vis" / "sample_detections.png"
     assert metadata_path.exists()
     assert crop_path.exists()
+    assert overlay_path.exists()
+
+    overlay = cv2.imread(str(overlay_path))
+    assert overlay is not None
+    assert overlay.shape == image.shape
+    assert not np.array_equal(overlay, image)
+    sampled_category_colors = {
+        tuple(int(channel) for channel in overlay[1, 1]),
+        tuple(int(channel) for channel in overlay[10, 70]),
+        tuple(int(channel) for channel in overlay[70, 1]),
+    }
+    assert len(sampled_category_colors) == 3
+    assert any(
+        artifact.role == "detection_overlay" and Path(artifact.path) == overlay_path
+        for artifact in result.artifacts
+    )

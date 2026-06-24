@@ -49,6 +49,7 @@ class MapProcessingService:
         )
 
         region_artifacts = self._write_component_artifacts(image, result)
+        self._write_detection_overlay(image, result)
         self._extract_legend(result, region_artifacts)
         self._estimate_areas(result, region_artifacts)
 
@@ -83,6 +84,17 @@ class MapProcessingService:
                 elif label == "index_map":
                     image_ops.annotate_image_with_directions(artifact_path, artifact_path)
         return artifact_paths
+
+    def _write_detection_overlay(self, image: Any, result: MapProcessingResult) -> None:
+        artifact_path = self.cache.visualization_path(result.name)
+        image_ops.annotate_detections_on_image(image, result.regions, artifact_path)
+        result.artifacts.append(
+            ArtifactRef(
+                path=artifact_path,
+                role="detection_overlay",
+                stage="hie",
+            )
+        )
 
     def _write_lonlat_artifact(
         self,

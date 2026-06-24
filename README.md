@@ -93,6 +93,17 @@ also be installed without `git-lfs` when needed:
 bash scripts/download_usgs_examples.sh --all
 ```
 
+## Map Processing Outputs
+
+`MapProcessingService.process_image(...)` writes derived artifacts under
+`${GEOMAP_CACHE_ROOT:-.cache}/${GEOMAP_DATASET_SOURCE:-usgs}/map_processing/`:
+
+```text
+det/<map_name>/                  # component crops
+meta/<map_name>.json             # PEACE-compatible metadata
+vis/<map_name>_detections.png    # original image with category-colored detections
+```
+
 ## Environment Variables
 
 Use `.env.example` as the starting point for local configuration. Do not commit `.env`.

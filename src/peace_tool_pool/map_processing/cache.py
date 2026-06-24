@@ -30,6 +30,9 @@ class MapProcessingCache:
     def component_path(self, map_name: str, label: str, index: int) -> Path:
         return self.det_dir(map_name) / f"{label}_{index}.png"
 
+    def visualization_path(self, map_name: str) -> Path:
+        return self.config.cache_namespace_root / "vis" / f"{map_name}_detections.png"
+
     def metadata_path(self, map_name: str) -> Path:
         return self.config.cache_namespace_root / "meta" / f"{map_name}.json"
 

@@ -66,6 +66,18 @@ dependencies/models/det_component/weights/best.pt
 dependencies/models/det_legend/weights/best.pt
 ```
 
+Install PEACE's vendored Ultralytics YOLOv10 tree if it is not already present:
+
+```bash
+bash scripts/install_peace_ultralytics.sh --source "${PEACE_SOURCE_ROOT:-$HOME/peace}"
+```
+
+Expected local source path after bootstrap:
+
+```text
+dependencies/ultralytics/
+```
+
 Install a tiny set of USGS example maps from the Hugging Face dataset without cloning
 the full benchmark repository:
 

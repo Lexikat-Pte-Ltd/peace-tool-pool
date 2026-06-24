@@ -12,11 +12,18 @@ dependencies = []
 
 [project.optional-dependencies]
 detectors = [
+    "huggingface-hub>=0.24,<1",
+    "matplotlib==3.9.2",
     "numpy==1.26.4",
     "opencv-python==4.10.0.84",
+    "pandas==2.2.2",
     "pillow==11.0.0",
+    "psutil==6.0.0",
+    "pyyaml>=6,<7",
+    "requests>=2,<3",
     "torch==2.0.1",
     "torchvision==0.15.2",
+    "tqdm==4.66.5",
 ]
 mcp = [
     "mcp>=1.0,<2",

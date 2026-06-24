@@ -1,0 +1,4 @@
+time,latitude,longitude,place,mag,magType,depth,type,updated,gap
+2022-01-02T00:00:00Z,37.5,-121.5,Newer in bounds,5.2,mb,8.0,earthquake,2022-01-03T00:00:00Z,30
+2020-01-01T00:00:00Z,37.2,-121.7,Older in bounds,4.8,mb,10.0,earthquake,2020-01-02T00:00:00Z,40
+2019-01-01T00:00:00Z,40.0,-130.0,Outside,6.0,mb,12.0,earthquake,2019-01-02T00:00:00Z,50

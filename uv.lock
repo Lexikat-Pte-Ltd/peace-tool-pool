@@ -823,7 +823,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'detectors'", specifier = "==0.15.2" },
     { name = "tqdm", marker = "extra == 'detectors'", specifier = "==4.66.5" },
 ]
-provides-extras = ["detectors", "mcp"]
+provides-extras = ["detectors", "knowledge-local", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [

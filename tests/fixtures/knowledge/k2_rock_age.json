@@ -1,0 +1,6 @@
+[
+  {"rock_name": "sandstone", "rock_value": "mesozoic"},
+  {"rock_name": "red sandstone", "rock_value": "jurassic"},
+  {"rock_name": "basalt", "rock_value": "cenozoic"},
+  {"rock_name": "灰岩", "rock_value": "permian"}
+]

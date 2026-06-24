@@ -25,6 +25,7 @@ detectors = [
     "torchvision==0.15.2",
     "tqdm==4.66.5",
 ]
+knowledge-local = []
 mcp = [
     "mcp>=1.0,<2",
 ]

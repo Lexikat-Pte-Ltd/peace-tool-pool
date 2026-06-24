@@ -45,6 +45,7 @@ The default environment stays lightweight. Install extras only for the tool fami
 | ---------------------------------- | ------------------------------------ |
 | `uv sync`                          | Package scaffold only.               |
 | `uv sync --extra detectors`        | Component and legend detection work. |
+| `uv sync --extra knowledge-local`  | Local geological knowledge fixtures. |
 | `uv sync --extra mcp`              | Future MCP server surface.           |
 | `uv sync --all-extras --group dev` | Full local development environment.  |
 
@@ -78,6 +79,19 @@ Expected local source path after bootstrap:
 dependencies/ultralytics/
 ```
 
+Install PEACE's local geological knowledge assets if you want offline knowledge
+queries for legend lithology, stratigraphic age, earthquakes, and active faults:
+
+```bash
+bash scripts/install_knowledge_assets.sh --source "${PEACE_SOURCE_ROOT:-$HOME/peace}"
+```
+
+Expected local asset path after bootstrap:
+
+```text
+dependencies/knowledge/
+```
+
 Install a tiny set of USGS example maps from the Hugging Face dataset without cloning
 the full benchmark repository:
 
@@ -104,6 +118,25 @@ meta/<map_name>.json             # PEACE-compatible metadata
 vis/<map_name>_detections.png    # original image with category-colored detections
 ```
 
+## Knowledge Services
+
+`KnowledgeService` exposes deterministic, local geological lookups without Earth
+Engine credentials or live LLM calls:
+
+```python
+from peace_tool_pool.knowledge import Bounds, KnowledgeService
+
+service = KnowledgeService.from_env()
+bundle = service.query_bounds(
+    Bounds(min_lon=-122.5, min_lat=37.0, max_lon=-121.5, max_lat=38.0),
+    include=("active_faults", "earthquake_history"),
+)
+legend = service.enrich_legend_label("sandstone")
+```
+
+Provider outputs are written under `${GEOMAP_CACHE_ROOT:-.cache}/knowledge/v1/`
+when caching is enabled.
+
 ## Environment Variables
 
 Use `.env.example` as the starting point for local configuration. Do not commit `.env`.
@@ -112,7 +145,9 @@ Use `.env.example` as the starting point for local configuration. Do not commit 
 | ------------------- | ---------------------------------------------------------------------- |
 | `GEOMAP_DATA_ROOT`  | Local data or sample maps.                                             |
 | `GEOMAP_MODEL_ROOT` | Detector model root.                                                   |
+| `GEOMAP_KNOWLEDGE_ROOT` | Local geological knowledge asset root.                            |
 | `GEOMAP_CACHE_ROOT` | Cache root for detector outputs and derived artifacts.                 |
+| `GEOMAP_EARTHENGINE_PROJECT` | Future Earth Engine project id for live providers.           |
 | `PEACE_SOURCE_ROOT` | Optional pointer to the source PEACE checkout for local bootstrapping. |
 
 ## References

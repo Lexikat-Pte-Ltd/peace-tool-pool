@@ -29,4 +29,6 @@ runs/
 models.zip
 dependencies/models/**
 !dependencies/models/.gitkeep
+dependencies/knowledge/**
+!dependencies/knowledge/.gitkeep
 dependencies/ultralytics/

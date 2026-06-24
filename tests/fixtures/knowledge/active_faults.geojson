@@ -1,0 +1,37 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "slip_type": "strike-slip",
+        "name": "Alpha Fault",
+        "catalog_name": "Fixture",
+        "dip_dir": "NE",
+        "average_dip": 70,
+        "average_rake": 10,
+        "lower_seis_depth": 12,
+        "upper_seis_depth": 1
+      },
+      "geometry": {"type": "LineString", "coordinates": [[-122.0, 37.0], [-121.0, 38.0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "slip_type": "normal",
+        "name": "Beta Fault",
+        "catalog_name": "Fixture"
+      },
+      "geometry": {"type": "LineString", "coordinates": [[-121.8, 37.8], [-121.2, 37.2]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "slip_type": "reverse",
+        "name": "Outside Fault",
+        "catalog_name": "Fixture"
+      },
+      "geometry": {"type": "LineString", "coordinates": [[-130.0, 40.0], [-129.0, 41.0]]}
+    }
+  ]
+}

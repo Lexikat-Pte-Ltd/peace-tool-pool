@@ -1,0 +1,7 @@
+[
+  {"rock_name": "sandstone", "rock_value": "sedimentary"},
+  {"rock_name": "red sandstone", "rock_value": "red sedimentary"},
+  {"rock_name": "basalt", "rock_value": "igneous"},
+  {"rock_name": "gray limestone", "rock_value": "carbonate"},
+  {"rock_name": "灰岩", "rock_value": "carbonate"}
+]

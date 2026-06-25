@@ -11,9 +11,14 @@ from .bounds import Bounds
 from .cache import KnowledgeCache, stable_hash
 from .config import KnowledgeConfig
 from .errors import MissingAssetError, OptionalDependencyError, ProviderError
+from .providers.earthengine import (
+    EarthEngineLandcoverProvider,
+    EarthEnginePopulationDensityProvider,
+)
 from .providers.earthquakes import EarthquakeHistoryProvider
 from .providers.faults import ActiveFaultProvider
 from .providers.rock import RockLookupProvider
+from .providers.semantic_k2 import SemanticK2Provider, SentenceTransformerSemanticBackend
 from .types import KnowledgeBundle, KnowledgeItem, KnowledgeRequest, LegendEnrichment
 
 
@@ -28,6 +33,7 @@ class ProviderRegistration:
     output_keys: tuple[str, ...]
     factory: ProviderFactory
     supports: SupportPredicate
+    default_enabled: bool = True
 
 
 class KnowledgeService:
@@ -57,6 +63,8 @@ class KnowledgeService:
         items: list[KnowledgeItem] = []
         provider_versions: dict[str, str] = {}
         trace_events: list[dict[str, Any]] = []
+        explicit_success_ids: set[str] = set()
+        explicit_failures: list[tuple[str, BaseException]] = []
 
         for registration in registrations:
             explicit = registration.id in explicit_ids
@@ -64,6 +72,8 @@ class KnowledgeService:
                 provider = self._provider_for_registration(registration)
                 provider_items = self._query_provider(provider, request)
                 items.extend(provider_items)
+                if explicit:
+                    explicit_success_ids.add(registration.id)
                 provider_versions[provider.id] = self._provider_version(provider)
                 trace_events.append(
                     {
@@ -72,14 +82,24 @@ class KnowledgeService:
                         "truncated": any(item.truncated for item in provider_items),
                     }
                 )
-            except (MissingAssetError, OptionalDependencyError):
+            except (MissingAssetError, OptionalDependencyError) as exc:
                 if explicit:
-                    raise
+                    explicit_failures.append((registration.id, exc))
+                    warnings.append(f"{registration.id}: {exc}")
+                    continue
                 warnings.append(f"{registration.id}: configured provider asset or dependency is unavailable.")
             except Exception as exc:  # noqa: BLE001 - provider boundaries should isolate failures.
-                if explicit and len(registrations) == 1:
-                    raise ProviderError(f"Provider {registration.id!r} failed: {exc}") from exc
+                provider_error = ProviderError(f"Provider {registration.id!r} failed: {exc}")
+                if explicit:
+                    explicit_failures.append((registration.id, provider_error))
+                    warnings.append(
+                        f"{registration.id}: provider failed: {type(exc).__name__}: {exc}"
+                    )
+                    continue
                 warnings.append(f"{registration.id}: provider failed: {type(exc).__name__}: {exc}")
+
+        if explicit_ids and not explicit_success_ids and explicit_failures:
+            raise explicit_failures[0][1]
 
         trace = {"trace_id": request.trace_id, "providers": trace_events}
         return KnowledgeBundle(
@@ -133,6 +153,7 @@ class KnowledgeService:
         )
 
     def _default_registrations(self) -> list[ProviderRegistration]:
+        semantic_backend_factory = self._semantic_backend_factory()
         return [
             ProviderRegistration(
                 id="rock_type",
@@ -165,6 +186,7 @@ class KnowledgeService:
                 factory=lambda: EarthquakeHistoryProvider(
                     self.config.resolved_earthquake_csv_path,
                     default_max_records=self.config.max_records_per_provider,
+                    engine=self.config.earthquake_engine,
                 ),
                 supports=lambda request: request.bounds is not None,
             ),
@@ -175,10 +197,125 @@ class KnowledgeService:
                 factory=lambda: ActiveFaultProvider(
                     self.config.resolved_active_fault_geojson_path,
                     default_max_records=self.config.max_records_per_provider,
+                    geometry_engine=self.config.fault_geometry_engine,
                 ),
                 supports=lambda request: request.bounds is not None,
             ),
+            ProviderRegistration(
+                id="landcover_distribution",
+                name="Landcover distribution",
+                output_keys=("landcover_distribution",),
+                factory=lambda: EarthEngineLandcoverProvider(
+                    dataset_id=self.config.earthengine_landcover_dataset_id,
+                    project=self.config.earthengine_project,
+                    scale=self.config.earthengine_scale,
+                    max_pixels=self.config.earthengine_max_pixels,
+                ),
+                supports=lambda request: request.bounds is not None,
+                default_enabled=False,
+            ),
+            ProviderRegistration(
+                id="population_density",
+                name="Population density",
+                output_keys=("population_density",),
+                factory=lambda: EarthEnginePopulationDensityProvider(
+                    dataset_id=self.config.earthengine_population_dataset_id,
+                    project=self.config.earthengine_project,
+                    scale=self.config.earthengine_scale,
+                    max_pixels=self.config.earthengine_max_pixels,
+                ),
+                supports=lambda request: request.bounds is not None,
+                default_enabled=False,
+            ),
+            ProviderRegistration(
+                id="rock_knowledge",
+                name="K2 semantic rock knowledge",
+                output_keys=("rock_knowledge",),
+                factory=lambda: SemanticK2Provider(
+                    provider_id="rock_knowledge",
+                    name="K2 semantic rock knowledge",
+                    output_key="rock_knowledge",
+                    asset_path=self.config.resolved_k2_rock_detail_path,
+                    query_field="id",
+                    answer_field="answer",
+                    query_template="{query}",
+                    backend_factory=semantic_backend_factory,
+                    default_top_k=self.config.semantic_top_k,
+                    min_score=self.config.semantic_min_score,
+                    batch_size=self.config.semantic_batch_size,
+                    model_name=self.config.semantic_model_name,
+                    model_revision=self.config.semantic_model_revision,
+                    device=self.config.semantic_device,
+                    local_files_only=self.config.semantic_local_files_only,
+                ),
+                supports=lambda request: bool(request.query_text),
+                default_enabled=False,
+            ),
+            ProviderRegistration(
+                id="component_usage_knowledge",
+                name="K2 component usage knowledge",
+                output_keys=("component_usage_knowledge",),
+                factory=lambda: SemanticK2Provider(
+                    provider_id="component_usage_knowledge",
+                    name="K2 component usage knowledge",
+                    output_key="component_usage_knowledge",
+                    asset_path=self.config.resolved_k2_usage_path,
+                    query_field="question",
+                    answer_field="answer",
+                    query_template="What is the function of {query} in geologic maps?",
+                    backend_factory=semantic_backend_factory,
+                    default_top_k=self.config.semantic_top_k,
+                    min_score=self.config.semantic_min_score,
+                    batch_size=self.config.semantic_batch_size,
+                    model_name=self.config.semantic_model_name,
+                    model_revision=self.config.semantic_model_revision,
+                    device=self.config.semantic_device,
+                    local_files_only=self.config.semantic_local_files_only,
+                ),
+                supports=lambda request: bool(request.query_text),
+                default_enabled=False,
+            ),
+            ProviderRegistration(
+                id="downstream_task_knowledge",
+                name="K2 downstream task knowledge",
+                output_keys=("downstream_task_knowledge",),
+                factory=lambda: SemanticK2Provider(
+                    provider_id="downstream_task_knowledge",
+                    name="K2 downstream task knowledge",
+                    output_key="downstream_task_knowledge",
+                    asset_path=self.config.resolved_k2_expertise_path,
+                    query_field="question",
+                    answer_field="answer",
+                    query_template="How do geologists conduct the task of {query}?",
+                    backend_factory=semantic_backend_factory,
+                    default_top_k=self.config.semantic_top_k,
+                    min_score=self.config.semantic_min_score,
+                    batch_size=self.config.semantic_batch_size,
+                    model_name=self.config.semantic_model_name,
+                    model_revision=self.config.semantic_model_revision,
+                    device=self.config.semantic_device,
+                    local_files_only=self.config.semantic_local_files_only,
+                ),
+                supports=lambda request: bool(request.query_text),
+                default_enabled=False,
+            ),
         ]
+
+    def _semantic_backend_factory(self) -> Callable[[], SentenceTransformerSemanticBackend]:
+        backend: SentenceTransformerSemanticBackend | None = None
+
+        def factory() -> SentenceTransformerSemanticBackend:
+            nonlocal backend
+            if backend is None:
+                backend = SentenceTransformerSemanticBackend(
+                    self.config.semantic_model_name,
+                    model_revision=self.config.semantic_model_revision,
+                    device=self.config.semantic_device,
+                    local_files_only=self.config.semantic_local_files_only,
+                )
+            return backend
+
+        return factory
 
     def _registration_for_provider(self, provider: Any) -> ProviderRegistration:
         output_keys = tuple(getattr(provider, "output_keys", (provider.id,)))
@@ -188,6 +325,7 @@ class KnowledgeService:
             output_keys=output_keys,
             factory=lambda provider=provider: provider,
             supports=provider.supports,
+            default_enabled=True,
         )
 
     def _select_registrations(
@@ -211,7 +349,11 @@ class KnowledgeService:
                         continue
                     selected.append(registration)
         else:
-            selected = [registration for registration in self._registrations if registration.supports(request)]
+            selected = [
+                registration
+                for registration in self._registrations
+                if registration.default_enabled and registration.supports(request)
+            ]
 
         exclude_ids: set[str] = set()
         for exclude in request.exclude:
@@ -293,6 +435,7 @@ class KnowledgeService:
             {
                 "provider": provider.id,
                 "provider_version": provider_version,
+                "provider_config": self._provider_cache_config(provider),
                 "source_asset_path": str(getattr(provider, "asset_path", "")) or None,
                 "bounds": request.bounds.to_cache_dict(self.config.bounds_cache_precision)
                 if request.bounds is not None
@@ -304,6 +447,12 @@ class KnowledgeService:
                 "default_max_records": self.config.max_records_per_provider,
             }
         )
+
+    def _provider_cache_config(self, provider: Any) -> dict[str, Any] | None:
+        cache_config_method = getattr(provider, "cache_config", None)
+        if cache_config_method is None:
+            return None
+        return dict(cache_config_method())
 
     def _provider_version(self, provider: Any) -> str:
         source_version_method = getattr(provider, "source_version", None)

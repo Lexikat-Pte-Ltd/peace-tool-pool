@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..bounds import Bounds
+from ..errors import OptionalDependencyError
 from ..types import KnowledgeItem, KnowledgeRequest
 from .base import file_sha256_digest, max_records_for_request, source_version
+
+
+def _dependency_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
 
 
 class ActiveFaultProvider:
@@ -29,11 +35,19 @@ class ActiveFaultProvider:
         "upper_seis_depth",
     )
 
-    def __init__(self, asset_path: str | Path, default_max_records: int = 50):
+    def __init__(
+        self,
+        asset_path: str | Path,
+        default_max_records: int = 50,
+        geometry_engine: str = "auto",
+    ):
         self.asset_path = Path(asset_path)
         self.default_max_records = default_max_records
+        self.geometry_engine = geometry_engine
         self._features: list[dict[str, Any]] | None = None
         self._digest: str | None = None
+        self._shapely_index: tuple[Any, list[tuple[dict[str, Any], Any]], dict[int, int], Any] | None = None
+        self._active_geometry_mode = "bbox"
 
     def supports(self, request: KnowledgeRequest) -> bool:
         return request.bounds is not None
@@ -43,12 +57,22 @@ class ActiveFaultProvider:
             self._digest = file_sha256_digest(self.asset_path)
         return source_version(self.version, self._digest)
 
+    def cache_config(self) -> dict[str, Any]:
+        return {
+            "geometry_engine": self.geometry_engine,
+            "resolved_geometry_engine": self._resolved_geometry_engine_for_cache(),
+        }
+
+    def _resolved_geometry_engine_for_cache(self) -> str:
+        if self.geometry_engine == "auto":
+            return "shapely" if _dependency_available("shapely") else "bbox"
+        return self.geometry_engine
+
     def query(self, request: KnowledgeRequest) -> list[KnowledgeItem]:
         self.source_version()
         if request.bounds is None:
             return []
-        features = self._load_features()
-        matching = [feature for feature in features if self._feature_intersects(feature, request.bounds)]
+        matching = self._matching_features(request.bounds)
         matching.sort(key=self._sort_key)
         limit = max_records_for_request(self.id, request, self.default_max_records)
         limited = matching[:limit]
@@ -69,9 +93,77 @@ class ActiveFaultProvider:
                 source=str(self.asset_path),
                 record_count=total,
                 truncated=truncated,
-                provenance={"asset_path": str(self.asset_path), "geometry_mode": "bbox"},
+                provenance={
+                    "asset_path": str(self.asset_path),
+                    "geometry_mode": self._active_geometry_mode,
+                },
             )
         ]
+
+    def _matching_features(self, bounds: Bounds) -> list[dict[str, Any]]:
+        if self.geometry_engine in {"auto", "shapely"}:
+            try:
+                return self._matching_features_shapely(bounds)
+            except OptionalDependencyError:
+                if self.geometry_engine == "shapely":
+                    raise
+        if self.geometry_engine not in {"auto", "bbox", "shapely"}:
+            raise ValueError(f"Unsupported active fault geometry engine: {self.geometry_engine!r}")
+        self._active_geometry_mode = "bbox"
+        features = self._load_features()
+        return [feature for feature in features if self._feature_intersects(feature, bounds)]
+
+    def _matching_features_shapely(self, bounds: Bounds) -> list[dict[str, Any]]:
+        tree, entries, index_by_geometry_id, box = self._load_shapely_index()
+        query_geometry = box(bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat)
+        matching: list[dict[str, Any]] = []
+        for candidate in tree.query(query_geometry):
+            index = self._shapely_candidate_index(candidate, index_by_geometry_id)
+            if index is None:
+                continue
+            feature, geometry = entries[index]
+            if geometry.intersects(query_geometry):
+                matching.append(feature)
+        self._active_geometry_mode = "shapely"
+        return matching
+
+    def _load_shapely_index(
+        self,
+    ) -> tuple[Any, list[tuple[dict[str, Any], Any]], dict[int, int], Any]:
+        if self._shapely_index is not None:
+            return self._shapely_index
+        try:
+            from shapely.geometry import box, shape
+            from shapely.strtree import STRtree
+        except ImportError as exc:
+            raise OptionalDependencyError(
+                "ActiveFaultProvider shapely engine requires `uv sync --extra knowledge-local`."
+            ) from exc
+
+        entries: list[tuple[dict[str, Any], Any]] = []
+        for feature in self._load_features():
+            geometry_data = feature.get("geometry")
+            if geometry_data is None:
+                continue
+            try:
+                geometry = shape(geometry_data)
+            except Exception:  # noqa: BLE001 - malformed feature geometries are skipped.
+                continue
+            if geometry.is_empty:
+                continue
+            entries.append((feature, geometry))
+        tree = STRtree([geometry for _, geometry in entries])
+        index_by_geometry_id = {id(geometry): index for index, (_, geometry) in enumerate(entries)}
+        self._shapely_index = (tree, entries, index_by_geometry_id, box)
+        return self._shapely_index
+
+    def _shapely_candidate_index(self, candidate: Any, index_by_geometry_id: dict[int, int]) -> int | None:
+        if isinstance(candidate, int):
+            return candidate
+        index_method = getattr(candidate, "__index__", None)
+        if index_method is not None:
+            return int(index_method())
+        return index_by_geometry_id.get(id(candidate))
 
     def _load_features(self) -> list[dict[str, Any]]:
         if self._features is not None:

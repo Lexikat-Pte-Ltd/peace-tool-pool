@@ -41,13 +41,15 @@ uv run python -c "import peace_tool_pool; print(peace_tool_pool.__version__)"
 
 The default environment stays lightweight. Install extras only for the tool families you are actively extracting or testing.
 
-| Command                            | Use case                             |
-| ---------------------------------- | ------------------------------------ |
-| `uv sync`                          | Package scaffold only.               |
-| `uv sync --extra detectors`        | Component and legend detection work. |
-| `uv sync --extra knowledge-local`  | Local geological knowledge fixtures. |
-| `uv sync --extra mcp`              | Future MCP server surface.           |
-| `uv sync --all-extras --group dev` | Full local development environment.  |
+| Command                                  | Use case                                      |
+| ---------------------------------------- | --------------------------------------------- |
+| `uv sync`                                | Package scaffold only.                        |
+| `uv sync --extra detectors`              | Component and legend detection work.          |
+| `uv sync --extra knowledge-local`        | Optimized local geological knowledge queries. |
+| `uv sync --extra knowledge-earthengine`  | Live Earth Engine geographic providers.       |
+| `uv sync --extra knowledge-semantic`     | Semantic K2 retrieval with embedding models.  |
+| `uv sync --extra mcp`                    | Future MCP server surface.                    |
+| `uv sync --all-extras --group dev`       | Full local development environment.           |
 
 ## Local Assets
 
@@ -121,7 +123,7 @@ vis/<map_name>_detections.png    # original image with category-colored detectio
 ## Knowledge Services
 
 `KnowledgeService` exposes deterministic, local geological lookups without Earth
-Engine credentials or live LLM calls:
+Engine credentials or live LLM calls by default:
 
 ```python
 from peace_tool_pool.knowledge import Bounds, KnowledgeService
@@ -137,6 +139,29 @@ legend = service.enrich_legend_label("sandstone")
 Provider outputs are written under `${GEOMAP_CACHE_ROOT:-.cache}/knowledge/v1/`
 when caching is enabled.
 
+The `knowledge-local` extra enables faster local engines where available:
+
+```bash
+uv sync --extra knowledge-local
+```
+
+Set `GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE=pandas` to require pandas CSV filtering,
+or keep `auto` to use pandas when installed and fall back to stdlib CSV. Set
+`GEOMAP_KNOWLEDGE_FAULT_GEOMETRY_ENGINE=shapely` to require shapely STRtree
+geometry filtering, or keep `auto` to fall back to bbox filtering.
+
+Earth Engine and semantic K2 providers are registered but explicit-only. Request
+them with `include=("landcover_distribution", "population_density")` or
+`include=("rock_knowledge", "component_usage_knowledge")` after installing the
+matching extra and configuring credentials/assets.
+
+Semantic K2 retrieval defaults to CUDA when `torch.cuda.is_available()` is true
+and falls back to CPU only when CUDA is unavailable or `GEOMAP_SEMANTIC_DEVICE=cpu`
+is set. To require CUDA, set `GEOMAP_SEMANTIC_DEVICE=cuda` or `cuda:0`; startup
+will fail for that provider if CUDA is not available. Install a CUDA-enabled
+PyTorch build appropriate for the host before `knowledge-semantic` if the default
+wheel is not CUDA-enabled.
+
 ## Environment Variables
 
 Use `.env.example` as the starting point for local configuration. Do not commit `.env`.
@@ -147,7 +172,13 @@ Use `.env.example` as the starting point for local configuration. Do not commit 
 | `GEOMAP_MODEL_ROOT` | Detector model root.                                                   |
 | `GEOMAP_KNOWLEDGE_ROOT` | Local geological knowledge asset root.                            |
 | `GEOMAP_CACHE_ROOT` | Cache root for detector outputs and derived artifacts.                 |
-| `GEOMAP_EARTHENGINE_PROJECT` | Future Earth Engine project id for live providers.           |
+| `GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE` | `auto`, `csv`, or `pandas`.                    |
+| `GEOMAP_KNOWLEDGE_FAULT_GEOMETRY_ENGINE` | `auto`, `bbox`, or `shapely`.             |
+| `GEOMAP_EARTHENGINE_PROJECT` | Earth Engine project id for live providers.                  |
+| `GEOMAP_SEMANTIC_MODEL` | SentenceTransformer model for semantic K2 providers.                |
+| `GEOMAP_SEMANTIC_DEVICE` | `auto`, `cpu`, `cuda`, or `cuda:<index>`.                         |
+| `GEOMAP_SEMANTIC_TOP_K` | Default semantic K2 result count.                                    |
+| `GEOMAP_SEMANTIC_MIN_SCORE` | Optional semantic score threshold.                             |
 | `PEACE_SOURCE_ROOT` | Optional pointer to the source PEACE checkout for local bootstrapping. |
 
 ## References

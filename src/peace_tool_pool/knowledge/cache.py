@@ -15,10 +15,16 @@ from .types import KnowledgeItem, SCHEMA_VERSION
 def write_json_atomic(path: str | Path, data: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as temp_file:
-        json.dump(data, temp_file, indent=2, ensure_ascii=False, sort_keys=True)
-        temp_name = temp_file.name
-    Path(temp_name).replace(target)
+    temp_name: str | None = None
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as temp_file:
+            temp_name = temp_file.name
+            json.dump(data, temp_file, indent=2, ensure_ascii=False, sort_keys=True)
+        Path(temp_name).replace(target)
+    except Exception:
+        if temp_name is not None:
+            Path(temp_name).unlink(missing_ok=True)
+        raise
 
 
 def stable_hash(data: Any) -> str:
@@ -53,7 +59,10 @@ class KnowledgeCache:
             return None
         if data.get("provider_version") != provider_version:
             return None
-        return [KnowledgeItem.from_dict(item) for item in data.get("items", [])]
+        try:
+            return [KnowledgeItem.from_dict(item) for item in data.get("items", [])]
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def write_provider_items(
         self,

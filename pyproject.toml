@@ -25,7 +25,20 @@ detectors = [
     "torchvision==0.15.2",
     "tqdm==4.66.5",
 ]
-knowledge-local = []
+knowledge-earthengine = [
+    "earthengine-api>=1,<2",
+]
+knowledge-local = [
+    "pandas==2.2.2",
+    "shapely>=2,<3",
+]
+knowledge-semantic = [
+    "sentence-transformers>=3,<6",
+    # transformers>=4.56 (pulled by sentence-transformers>=5) needs torch>=2.1 for
+    # torch.compiler. Detectors pins torch==2.0.1 for the validated YOLO pipeline, so
+    # these two extras are declared conflicting under [tool.uv] to allow divergent torch.
+    "torch>=2.2,<3",
+]
 mcp = [
     "mcp>=1.0,<2",
 ]
@@ -49,3 +62,13 @@ target-version = "py310"
 [tool.uv]
 package = true
 default-groups = []
+
+# The detectors (YOLO) stack is pinned to torch==2.0.1, while knowledge-semantic
+# needs torch>=2.1. They cannot share a single resolved torch, so they are declared
+# mutually exclusive: install at most one of these extras in a given environment.
+conflicts = [
+    [
+        { extra = "detectors" },
+        { extra = "knowledge-semantic" },
+    ],
+]

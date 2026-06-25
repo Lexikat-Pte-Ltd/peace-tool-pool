@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 from peace_tool_pool.knowledge import Bounds, KnowledgeConfig, KnowledgeRequest, KnowledgeService
+from peace_tool_pool.knowledge.cache import write_json_atomic
 from peace_tool_pool.knowledge.errors import MissingAssetError, ProviderError
+from peace_tool_pool.knowledge.types import SCHEMA_VERSION
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "knowledge"
@@ -28,6 +30,13 @@ def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("GEOMAP_CACHE_ROOT", "cache-root")
     monkeypatch.setenv("GEOMAP_KNOWLEDGE_ROOT", "knowledge-root")
     monkeypatch.setenv("GEOMAP_EARTHENGINE_PROJECT", "earth-project")
+    monkeypatch.setenv("GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE", "pandas")
+    monkeypatch.setenv("GEOMAP_KNOWLEDGE_FAULT_GEOMETRY_ENGINE", "shapely")
+    monkeypatch.setenv("GEOMAP_SEMANTIC_MODEL", "fixture/model")
+    monkeypatch.setenv("GEOMAP_SEMANTIC_DEVICE", "cuda:0")
+    monkeypatch.setenv("GEOMAP_SEMANTIC_TOP_K", "7")
+    monkeypatch.setenv("GEOMAP_SEMANTIC_MIN_SCORE", "0.25")
+    monkeypatch.setenv("GEOMAP_SEMANTIC_LOCAL_FILES_ONLY", "true")
 
     config = KnowledgeConfig.from_env(base_dir=tmp_path)
 
@@ -35,6 +44,13 @@ def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
     assert config.cache_root == (tmp_path / "cache-root").resolve()
     assert config.knowledge_root == (tmp_path / "knowledge-root").resolve()
     assert config.earthengine_project == "earth-project"
+    assert config.earthquake_engine == "pandas"
+    assert config.fault_geometry_engine == "shapely"
+    assert config.semantic_model_name == "fixture/model"
+    assert config.semantic_device == "cuda:0"
+    assert config.semantic_top_k == 7
+    assert config.semantic_min_score == 0.25
+    assert config.semantic_local_files_only is True
     assert config.cache_namespace_root == config.cache_root / "knowledge" / "v1"
 
 
@@ -100,11 +116,31 @@ def test_explicit_missing_asset_raises_but_implicit_missing_assets_warn(tmp_path
     assert any("earthquake_history" in warning for warning in bundle.warnings)
 
 
+def test_explicit_partial_missing_asset_warns_and_returns_successful_provider(tmp_path):
+    config = fixture_config(tmp_path)
+    config.earthquake_csv_path = tmp_path / "missing.csv"
+    service = KnowledgeService(config=config)
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    bundle = service.query(
+        KnowledgeRequest(
+            bounds=bounds,
+            legend_labels=["sandstone"],
+            include=("earthquake_history", "rock_type"),
+        )
+    )
+
+    assert bundle.items_by_key()["rock_type"][0].value["value"] == "sedimentary"
+    assert any("earthquake_history" in warning for warning in bundle.warnings)
+
+
 def test_from_env_is_cheap_and_baseline_imports_stay_light(tmp_path, monkeypatch):
     for module_name in (
         "pandas",
         "geopandas",
         "ee",
+        "shapely",
+        "torch",
         "transformers",
         "sentence_transformers",
         "deep_translator",
@@ -119,8 +155,45 @@ def test_from_env_is_cheap_and_baseline_imports_stay_light(tmp_path, monkeypatch
         "pandas",
         "geopandas",
         "ee",
+        "shapely",
+        "torch",
         "transformers",
         "sentence_transformers",
         "deep_translator",
     ):
         assert module_name not in sys.modules
+
+
+def test_optional_heavy_providers_are_explicit_only(tmp_path):
+    service = KnowledgeService(config=fixture_config(tmp_path))
+
+    bundle = service.query(KnowledgeRequest(query_text="legend usage"))
+
+    assert bundle.items == []
+    assert bundle.warnings == []
+
+
+def test_corrupt_provider_cache_is_treated_as_cache_miss(tmp_path):
+    service = KnowledgeService(config=fixture_config(tmp_path))
+    cache_path = service.cache.provider_path("rock_type", "bad-cache")
+    write_json_atomic(
+        cache_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "provider": "rock_type",
+            "provider_version": "1@sha256:bad",
+            "items": [{"id": "missing-required-fields"}],
+        },
+    )
+
+    assert service.cache.read_provider_items("rock_type", "bad-cache", "1@sha256:bad") is None
+
+
+def test_atomic_json_write_cleans_temp_file_on_serialization_failure(tmp_path):
+    cache_path = tmp_path / "cache" / "bad.json"
+
+    with pytest.raises(TypeError):
+        write_json_atomic(cache_path, {"not_serializable": object()})
+
+    assert cache_path.parent.exists()
+    assert list(cache_path.parent.iterdir()) == []

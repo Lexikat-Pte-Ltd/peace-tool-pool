@@ -4,6 +4,7 @@ import pytest
 
 from peace_tool_pool.knowledge import Bounds, KnowledgeRequest
 from peace_tool_pool.knowledge.errors import MissingAssetError
+from peace_tool_pool.knowledge.providers import earthquakes, faults
 from peace_tool_pool.knowledge.providers.earthquakes import EarthquakeHistoryProvider
 from peace_tool_pool.knowledge.providers.faults import ActiveFaultProvider
 from peace_tool_pool.knowledge.providers.rock import RockLookupProvider
@@ -77,6 +78,29 @@ def test_earthquake_provider_tolerates_missing_optional_columns():
     ]
 
 
+def test_earthquake_provider_cache_config_records_resolved_auto_engine(monkeypatch):
+    monkeypatch.setattr(earthquakes, "_dependency_available", lambda name: name == "pandas")
+    provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv", engine="auto")
+
+    assert provider.cache_config()["resolved_engine"] == "pandas"
+
+    monkeypatch.setattr(earthquakes, "_dependency_available", lambda name: False)
+    provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv", engine="auto")
+
+    assert provider.cache_config()["resolved_engine"] == "csv"
+
+
+def test_earthquake_provider_coerces_numpy_like_scalars_to_native_float():
+    class FakeScalar:
+        def item(self):
+            return 8.0
+
+    provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv")
+
+    assert provider._coerce_value(FakeScalar()) == 8.0
+    assert provider._coerce_value(8.0) == 8.0
+
+
 def test_fault_provider_filters_geojson_and_truncates():
     provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson", default_max_records=1)
     bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
@@ -98,6 +122,18 @@ def test_fault_provider_filters_geojson_and_truncates():
             "geometry_bbox": [-122.0, 37.0, -121.0, 38.0],
         }
     ]
+
+
+def test_fault_provider_cache_config_records_resolved_auto_engine(monkeypatch):
+    monkeypatch.setattr(faults, "_dependency_available", lambda name: name == "shapely")
+    provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson", geometry_engine="auto")
+
+    assert provider.cache_config()["resolved_geometry_engine"] == "shapely"
+
+    monkeypatch.setattr(faults, "_dependency_available", lambda name: False)
+    provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson", geometry_engine="auto")
+
+    assert provider.cache_config()["resolved_geometry_engine"] == "bbox"
 
 
 def test_file_backed_providers_raise_for_missing_assets(tmp_path):

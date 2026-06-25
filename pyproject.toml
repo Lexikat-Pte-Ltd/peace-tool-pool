@@ -39,6 +39,10 @@ knowledge-semantic = [
     # these two extras are declared conflicting under [tool.uv] to allow divergent torch.
     "torch>=2.2,<3",
 ]
+geo = [
+    "numpy==1.26.4",
+    "pyproj>=3.4,<4",
+]
 mcp = [
     "mcp>=1.0,<2",
 ]

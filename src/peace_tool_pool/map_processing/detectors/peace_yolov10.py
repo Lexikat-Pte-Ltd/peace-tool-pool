@@ -103,7 +103,16 @@ class _YoloV10Detector:
         self.model = yolov10(str(self.model_path))
 
     def detect(self, image_path: str | Path) -> dict[str, list[Detection]]:
-        results = self.model.predict(source=str(image_path), verbose=False)
+        # save/save_txt/verbose/show must all be falsy or the PEACE fork replaces
+        # each Results with a lossy name-keyed dict (no confidence) via write_results
+        # (engine/predictor.py). save_txt defaults True, so it must be set explicitly.
+        results = self.model.predict(
+            source=str(image_path),
+            verbose=False,
+            save=False,
+            save_txt=False,
+            show=False,
+        )
         if not results:
             return {label: [] for label in self.class_names.values()}
         return normalize_yolov10_result(results[0], self.class_names)

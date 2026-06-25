@@ -146,11 +146,84 @@ class KnowledgeService:
         self,
         metadata: Mapping[str, Any],
         question: str | None = None,
+        *,
+        include: tuple[str, ...] = (),
+        exclude: tuple[str, ...] = (),
+        max_records: int | None = None,
     ) -> KnowledgeBundle:
-        raise NotImplementedError(
-            "KnowledgeService.query_map requires tested decimal bounds extraction from map "
-            "metadata; pass explicit Bounds to query_bounds in this phase."
+        """Query knowledge for a processed map.
+
+        ``metadata`` supplies the spatial extent via either ``"bounds"`` (a
+        :class:`Bounds` or ``{min_lon, min_lat, max_lon, max_lat[, crs]}`` dict)
+        or ``"georef"`` (``{crs, gcps, pixel_extent}``, reprojected via the
+        ``georef`` package — requires the ``geo`` extra). Legend labels are taken
+        from ``"legend_labels"`` or extracted from a ``"legend"`` block (native
+        dict or PEACE ``[id, {...}]`` pair form).
+        """
+        bounds = self._bounds_from_metadata(metadata)
+        legend_labels = self._legend_labels_from_metadata(metadata)
+        if bounds is None and not legend_labels:
+            raise ValueError(
+                "query_map requires 'bounds', 'georef', or 'legend'/'legend_labels' "
+                "in metadata."
+            )
+        return self.query(
+            KnowledgeRequest(
+                bounds=bounds,
+                legend_labels=legend_labels,
+                query_text=question,
+                include=include,
+                exclude=exclude,
+                max_records=max_records,
+            )
         )
+
+    @staticmethod
+    def _bounds_from_metadata(metadata: Mapping[str, Any]) -> Bounds | None:
+        raw = metadata.get("bounds")
+        if isinstance(raw, Bounds):
+            return raw
+        if isinstance(raw, Mapping):
+            return Bounds(**raw)
+        georef = metadata.get("georef")
+        if isinstance(georef, Mapping):
+            # Lazy import: reprojection needs the optional 'geo' extra (pyproj).
+            from ..georef import GroundControlPoint, georeference_bounds
+
+            gcps = []
+            for gcp in georef["gcps"]:
+                if isinstance(gcp, Mapping):
+                    gcps.append(GroundControlPoint(**gcp))
+                else:
+                    px, py, wx, wy = gcp
+                    gcps.append(
+                        GroundControlPoint(pixel_x=px, pixel_y=py, world_x=wx, world_y=wy)
+                    )
+            ref = georeference_bounds(
+                crs=georef["crs"],
+                gcps=gcps,
+                pixel_extent=tuple(georef["pixel_extent"]),
+            )
+            return ref.bounds
+        return None
+
+    @staticmethod
+    def _legend_labels_from_metadata(metadata: Mapping[str, Any]) -> list[str]:
+        explicit = metadata.get("legend_labels")
+        if explicit:
+            return [str(x) for x in explicit if str(x).strip()]
+        labels: list[str] = []
+        for entry in metadata.get("legend", []) or []:
+            text: Any = None
+            if isinstance(entry, Mapping):
+                text = entry.get("label") or entry.get("text")
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(
+                entry[1], Mapping
+            ):
+                text = entry[1].get("text") or entry[1].get("label")
+            if text and str(text).strip():
+                labels.append(str(text))
+        return labels
 
     def _default_registrations(self) -> list[ProviderRegistration]:
         semantic_backend_factory = self._semantic_backend_factory()

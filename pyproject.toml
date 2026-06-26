@@ -32,6 +32,9 @@ knowledge-local = [
     "pandas==2.2.2",
     "shapely>=2,<3",
 ]
+knowledge-network = [
+    "httpx>=0.27,<1",
+]
 knowledge-semantic = [
     "sentence-transformers>=3,<6",
     # transformers>=4.56 (pulled by sentence-transformers>=5) needs torch>=2.1 for

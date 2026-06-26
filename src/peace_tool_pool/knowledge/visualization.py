@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+import warnings as _warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -90,11 +91,15 @@ class KnowledgeOverlayFrame:
 class KnowledgeOverlay:
     frame: KnowledgeOverlayFrame
     items: list[KnowledgeOverlayItem] = field(default_factory=list)
+    out_of_bounds: list[KnowledgeOverlayItem] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "frame": self.frame.to_dict(),
             "items": [item.to_dict() for item in self.items],
+            "out_of_bounds": [item.to_dict() for item in self.out_of_bounds],
+            "warnings": list(self.warnings),
         }
 
 
@@ -126,21 +131,36 @@ def extract_knowledge_overlay(
             )
         )
 
+    # The target map is the queried region. Result geometries that land outside it
+    # cannot be a faithful annotation of that map -- they signal a coordinate/CRS
+    # misalignment. Hide them from the plot but surface them as warnings so the
+    # failure is never silent. Without query bounds there is nothing to validate
+    # against, so every result is kept (and the frame falls back to its extent).
+    out_of_bounds: list[KnowledgeOverlayItem] = []
     for knowledge_item in bundle.items:
         if include_provider_bounds:
             items.extend(_provider_bounds_items(knowledge_item))
-        items.extend(_result_geometry_items(knowledge_item))
+        for geometry in _result_geometry_items(knowledge_item):
+            if bounds_parts and not _result_within_parts(geometry, bounds_parts):
+                out_of_bounds.append(geometry)
+            else:
+                items.append(geometry)
+
+    frame_bounds = _bounds_union(bounds_parts) if bounds_parts else _bounds_for_items(items)
+    overlay_warnings = _out_of_bounds_warnings(out_of_bounds, frame_bounds)
+    for message in overlay_warnings:
+        _warnings.warn(message, stacklevel=2)
 
     frame = KnowledgeOverlayFrame(
         source="geographic_canvas",
         crs="EPSG:4326",
-        bounds=_bounds_for_items(items),
+        bounds=frame_bounds,
         bounds_parts=bounds_parts,
         item_ids=[item.id for item in items],
         image_path=_metadata_image_path(metadata),
         georef=_metadata_georef(metadata),
     )
-    return KnowledgeOverlay(frame=frame, items=items)
+    return KnowledgeOverlay(frame=frame, items=items, out_of_bounds=out_of_bounds, warnings=overlay_warnings)
 
 
 def render_knowledge_overlay_svg(
@@ -166,6 +186,7 @@ def render_knowledge_overlay_svg(
         ".title { font-size: 22px; font-weight: 700; }",
         ".subtitle { font-size: 12px; fill: #475569; }",
         ".axis { font-size: 11px; fill: #64748b; }",
+        ".warning { font-size: 12px; font-weight: 700; fill: #b91c1c; }",
         ".label { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: white; stroke-width: 3px; }",
         "</style>",
         '<rect x="0" y="0" width="100%" height="100%" fill="#f8fafc"/>',
@@ -189,6 +210,12 @@ def render_knowledge_overlay_svg(
         f'lat [{bounds.min_lat:.4f}, {bounds.max_lat:.4f}] · {overlay.frame.crs}'
         "</text>"
     )
+    if overlay.warnings:
+        note = (
+            f"⚠ {len(overlay.out_of_bounds)} annotation(s) outside the target map "
+            "bounds were hidden (possible CRS misalignment)."
+        )
+        lines.append(f'<text x="24" y="72" class="warning">{_escape(note)}</text>')
     lines.extend(_grid_svg(bounds, project))
 
     for item in overlay.items:
@@ -350,6 +377,65 @@ def _bounds_for_items(items: Sequence[KnowledgeOverlayItem]) -> Bounds | None:
         min_lat = max(-90.0, min_lat - 0.01)
         max_lat = min(90.0, max_lat + 0.01)
     return Bounds(min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat)
+
+
+def _bounds_union(parts: Sequence[Bounds]) -> Bounds | None:
+    if not parts:
+        return None
+    return Bounds(
+        min_lon=min(part.min_lon for part in parts),
+        min_lat=min(part.min_lat for part in parts),
+        max_lon=max(part.max_lon for part in parts),
+        max_lat=max(part.max_lat for part in parts),
+    )
+
+
+def _bounds_contains_point(bounds: Bounds, lon: float, lat: float) -> bool:
+    return (
+        bounds.min_lon <= lon <= bounds.max_lon
+        and bounds.min_lat <= lat <= bounds.max_lat
+    )
+
+
+def _bounds_intersects(a: Bounds, b: Bounds) -> bool:
+    return not (
+        a.max_lon < b.min_lon
+        or a.min_lon > b.max_lon
+        or a.max_lat < b.min_lat
+        or a.min_lat > b.max_lat
+    )
+
+
+def _result_within_parts(item: KnowledgeOverlayItem, parts: Sequence[Bounds]) -> bool:
+    """Whether a result geometry belongs on a map covering ``parts``.
+
+    Points must be contained; result bounding boxes need only intersect a part so a
+    feature straddling the map edge (e.g. a fault crossing the boundary) is retained.
+    Membership is tested per part rather than against a merged box, which keeps
+    antimeridian-split queries from accepting points in the unqueried middle.
+    """
+
+    if item.bounds is not None:
+        return any(_bounds_intersects(part, item.bounds) for part in parts)
+    if item.lon is not None and item.lat is not None:
+        return any(_bounds_contains_point(part, item.lon, item.lat) for part in parts)
+    return True
+
+
+def _out_of_bounds_warnings(
+    dropped: Sequence[KnowledgeOverlayItem],
+    target: Bounds | None,
+) -> list[str]:
+    if not dropped or target is None:
+        return []
+    providers = sorted({item.provider or "unknown" for item in dropped})
+    return [
+        f"{len(dropped)} knowledge annotation(s) fell outside the target map bounds "
+        f"[lon {target.min_lon:.4f}..{target.max_lon:.4f}, "
+        f"lat {target.min_lat:.4f}..{target.max_lat:.4f}] and were hidden "
+        f"(providers: {', '.join(providers)}). "
+        "This usually indicates a coordinate or CRS misalignment in the lookup."
+    ]
 
 
 def _metadata_image_path(metadata: Mapping[str, Any] | None) -> str | None:

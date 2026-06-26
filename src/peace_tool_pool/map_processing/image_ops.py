@@ -105,6 +105,16 @@ def _text_color_for_background(rgb_color: Sequence[int]) -> tuple[int, int, int]
     return (0, 0, 0) if luminance > 150 else (255, 255, 255)
 
 
+def _blend_rectangle(cv2: Any, image: Any, bbox: BBox, color: Sequence[int], alpha: float) -> None:
+    x0, y0, x1, y1 = bbox
+    if x0 >= x1 or y0 >= y1:
+        return
+    roi = image[y0:y1, x0:x1]
+    fill = roi.copy()
+    fill[:] = color
+    cv2.addWeighted(fill, alpha, roi, 1 - alpha, 0, dst=roi)
+
+
 def annotate_detections_on_image(
     image: Any,
     detections_by_label: Mapping[str, Sequence[Any]],
@@ -180,7 +190,31 @@ def annotate_detections_on_image(
             )
 
     legend_list = list(legend_entries)
+    legend_box_heights: list[int] = []
     for entry in legend_list:
+        for bbox in (entry.color_bbox, entry.text_bbox):
+            clipped = _safe_clip_bbox(bbox, width, height)
+            if clipped is None:
+                continue
+            legend_box_heights.append(clipped[3] - clipped[1])
+
+    standard_legend_height = 12
+    if legend_box_heights:
+        standard_legend_height = sorted(legend_box_heights)[len(legend_box_heights) // 2]
+
+    legend_thickness = 1
+    (_base_text_width, base_text_height), base_baseline = cv2.getTextSize(
+        "Ag",
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        1,
+    )
+    target_text_height = max(5, min(12, round(standard_legend_height * 0.45)))
+    legend_font_scale = max(0.18, min(0.55, target_text_height / (base_text_height + base_baseline)))
+    legend_font_thickness = 1
+    legend_padding = max(1, min(3, round(standard_legend_height * 0.08)))
+    for entry in legend_list:
+        swatch_color = _rgb_to_bgr(entry.color_rgb)
         color_bbox = _safe_clip_bbox(entry.color_bbox, width, height)
         if color_bbox is not None:
             x0, y0, x1, y1 = color_bbox
@@ -188,146 +222,86 @@ def annotate_detections_on_image(
                 annotated,
                 (x0, y0),
                 (x1, y1),
-                _rgb_to_bgr(entry.color_rgb),
-                thickness=thickness,
+                swatch_color,
+                thickness=legend_thickness,
                 lineType=cv2.LINE_AA,
             )
 
         text_bbox = _safe_clip_bbox(entry.text_bbox, width, height)
         if text_bbox is not None:
             x0, y0, x1, y1 = text_bbox
-            text_box_color = _rgb_to_bgr((15, 23, 42))
             cv2.rectangle(
                 annotated,
                 (x0, y0),
                 (x1, y1),
-                text_box_color,
-                thickness=thickness,
+                swatch_color,
+                thickness=legend_thickness,
                 lineType=cv2.LINE_AA,
             )
-            caption = f"legend {entry.id}"
+            caption = f"#{entry.id} {entry.area_fraction:.1%}"
             (text_width, text_height), baseline = cv2.getTextSize(
                 caption,
                 cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                font_thickness,
+                legend_font_scale,
+                legend_font_thickness,
             )
-            label_width = min(width, text_width + padding * 2)
-            label_height = text_height + baseline + padding * 2
+            chip_size = max(5, min(12, text_height + baseline))
+            chip_size = max(4, min(chip_size, round(standard_legend_height * 0.55)))
+            label_width = min(width, text_width + chip_size + legend_padding * 4)
+            label_height = max(text_height + baseline, chip_size) + legend_padding * 2
             label_x0 = min(x0, max(0, width - label_width))
             label_x1 = min(width, label_x0 + label_width)
-            label_y0 = y0 - label_height if y0 - label_height >= 0 else y0
+            if y0 - label_height >= 0:
+                label_y0 = y0 - label_height
+            else:
+                label_y0 = min(max(0, y1), max(0, height - label_height))
             label_y1 = min(height, label_y0 + label_height)
-            text_y = min(height - padding - baseline, label_y0 + padding + text_height)
+            _blend_rectangle(
+                cv2,
+                annotated,
+                (label_x0, label_y0, label_x1, label_y1),
+                _rgb_to_bgr((248, 250, 252)),
+                alpha=0.7,
+            )
             cv2.rectangle(
                 annotated,
                 (label_x0, label_y0),
                 (label_x1, label_y1),
-                text_box_color,
-                thickness=-1,
-            )
-            cv2.putText(
-                annotated,
-                caption,
-                (label_x0 + padding, max(text_height, text_y)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                (255, 255, 255),
-                thickness=font_thickness,
-                lineType=cv2.LINE_AA,
-            )
-
-    if legend_list:
-        title = "legend swatches"
-        row_font_scale = max(0.35, font_scale * 0.85)
-        (_title_width, title_height), title_baseline = cv2.getTextSize(
-            title,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            row_font_scale,
-            font_thickness,
-        )
-        (_sample_width, sample_height), sample_baseline = cv2.getTextSize(
-            "#0 #FFFFFF Medium Aquamarine 100.0%",
-            cv2.FONT_HERSHEY_SIMPLEX,
-            row_font_scale,
-            font_thickness,
-        )
-        header_height = title_height + title_baseline + padding * 2
-        row_height = max(sample_height + sample_baseline + padding * 2, padding * 4)
-        margin = max(3, padding)
-        panel_width = min(width - margin * 2, max(90, min(360, round(width * 0.4))))
-        available_height = height - margin * 2
-        max_rows = max(0, (available_height - header_height - padding * 2) // row_height)
-        rows_to_draw = min(len(legend_list), max_rows)
-
-        if panel_width > padding * 4 and rows_to_draw > 0:
-            panel_height = header_height + rows_to_draw * row_height + padding * 2
-            panel_x0 = max(margin, width - panel_width - margin)
-            panel_y0 = max(margin, height - panel_height - margin)
-            panel_x1 = min(width - margin, panel_x0 + panel_width)
-            panel_y1 = min(height - margin, panel_y0 + panel_height)
-            cv2.rectangle(
-                annotated,
-                (panel_x0, panel_y0),
-                (panel_x1, panel_y1),
-                _rgb_to_bgr((248, 250, 252)),
-                thickness=-1,
-            )
-            cv2.rectangle(
-                annotated,
-                (panel_x0, panel_y0),
-                (panel_x1, panel_y1),
                 _rgb_to_bgr((71, 85, 105)),
                 thickness=1,
                 lineType=cv2.LINE_AA,
             )
-            cv2.putText(
+            chip_x0 = label_x0 + legend_padding
+            chip_y0 = label_y0 + max(0, (label_height - chip_size) // 2)
+            chip_x1 = min(label_x1 - legend_padding, chip_x0 + chip_size)
+            chip_y1 = min(label_y1 - legend_padding, chip_y0 + chip_size)
+            cv2.rectangle(
                 annotated,
-                title,
-                (panel_x0 + padding, panel_y0 + padding + title_height),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                row_font_scale,
+                (chip_x0, chip_y0),
+                (chip_x1, chip_y1),
+                swatch_color,
+                thickness=-1,
+            )
+            cv2.rectangle(
+                annotated,
+                (chip_x0, chip_y0),
+                (chip_x1, chip_y1),
                 _rgb_to_bgr((15, 23, 42)),
-                thickness=font_thickness,
+                thickness=1,
                 lineType=cv2.LINE_AA,
             )
-            row_y = panel_y0 + header_height + padding
-            chip_size = max(5, min(row_height - padding * 2, 14))
-            for entry in legend_list[:rows_to_draw]:
-                chip_x0 = panel_x0 + padding
-                chip_y0 = row_y + max(0, (row_height - chip_size) // 2)
-                chip_x1 = min(panel_x1 - padding, chip_x0 + chip_size)
-                chip_y1 = min(panel_y1 - padding, chip_y0 + chip_size)
-                cv2.rectangle(
-                    annotated,
-                    (chip_x0, chip_y0),
-                    (chip_x1, chip_y1),
-                    _rgb_to_bgr(entry.color_rgb),
-                    thickness=-1,
-                )
-                cv2.rectangle(
-                    annotated,
-                    (chip_x0, chip_y0),
-                    (chip_x1, chip_y1),
-                    _rgb_to_bgr((15, 23, 42)),
-                    thickness=1,
-                    lineType=cv2.LINE_AA,
-                )
-                row_text = (
-                    f"#{entry.id} {entry.color_hex} "
-                    f"{entry.color_name} {entry.area_fraction:.1%}"
-                )
-                cv2.putText(
-                    annotated,
-                    row_text,
-                    (chip_x1 + padding, chip_y0 + chip_size - max(1, padding // 2)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    row_font_scale,
-                    _rgb_to_bgr((15, 23, 42)),
-                    thickness=font_thickness,
-                    lineType=cv2.LINE_AA,
-                )
-                row_y += row_height
+            text_x = chip_x1 + legend_padding
+            text_y = min(label_y1 - legend_padding - baseline, label_y0 + legend_padding + text_height)
+            cv2.putText(
+                annotated,
+                caption,
+                (text_x, max(text_height, text_y)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                legend_font_scale,
+                _rgb_to_bgr((15, 23, 42)),
+                thickness=legend_font_thickness,
+                lineType=cv2.LINE_AA,
+            )
     save_image(output_path, annotated)
 
 

@@ -30,7 +30,7 @@ def test_annotate_detections_empty_legend_entries_is_noop(tmp_path):
     assert np.array_equal(empty_legend, baseline)
 
 
-def test_annotate_detections_draws_legend_entries_and_bottom_right_panel(tmp_path):
+def test_annotate_detections_draws_legend_entries_with_inline_swatch_tags(tmp_path):
     image = np.full((140, 220, 3), 255, dtype=np.uint8)
     detections = {
         "main_map": [Detection(label="main_map", bbox=(5, 5, 95, 95), confidence=0.92)]
@@ -70,12 +70,46 @@ def test_annotate_detections_draws_legend_entries_and_bottom_right_panel(tmp_pat
     assert not np.array_equal(overlay[20, 120], image[20, 120])
     assert not np.array_equal(overlay[20, 142], image[20, 142])
 
-    panel_region = overlay[80:136, 120:216]
-    source_region = image[80:136, 120:216]
-    assert not np.array_equal(panel_region, source_region)
-    panel_pixels = panel_region.reshape(-1, 3)
-    assert np.any(np.all(panel_pixels == (0, 0, 255), axis=1))
-    assert np.any(np.all(panel_pixels == (0, 255, 0), axis=1))
+    first_tag_pixels = overlay[3:20, 140:216].reshape(-1, 3)
+    second_tag_pixels = overlay[28:45, 140:216].reshape(-1, 3)
+    assert np.any(np.all(first_tag_pixels == (0, 0, 255), axis=1))
+    assert np.any(np.all(second_tag_pixels == (0, 255, 0), axis=1))
+
+    unused_panel_region = overlay[96:136, 128:216]
+    source_region = image[96:136, 128:216]
+    assert np.array_equal(unused_panel_region, source_region)
+
+
+def test_legend_inline_tag_scales_to_box_height_and_blends_background(tmp_path):
+    image = np.full((900, 900, 3), (30, 80, 140), dtype=np.uint8)
+    legend_entries = [
+        LegendEntry(
+            id=0,
+            color_bbox=(100, 100, 110, 110),
+            text_bbox=(120, 100, 170, 110),
+            color_rgb=(255, 0, 0),
+            color_hex="#FF0000",
+            color_name="Red",
+            area_fraction=0.125,
+        )
+    ]
+    output_path = tmp_path / "scaled_legend_overlay.png"
+
+    image_ops.annotate_detections_on_image(
+        image,
+        {},
+        output_path,
+        legend_entries=legend_entries,
+    )
+
+    overlay = cv2.imread(str(output_path))
+    assert overlay is not None
+    tag_region = overlay[70:100, 120:220]
+    source_region = image[70:100, 120:220]
+    changed_rows = np.where(np.any(tag_region != source_region, axis=2))[0]
+    assert changed_rows.size > 0
+    assert int(changed_rows.min()) + 70 >= 88
+    assert not np.any(np.all(tag_region.reshape(-1, 3) == (252, 250, 248), axis=1))
 
 
 def test_annotate_detections_skips_invalid_legend_bboxes(tmp_path):

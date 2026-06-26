@@ -69,7 +69,8 @@ def test_service_processes_image_and_writes_peace_metadata(tmp_path):
     assert overlay is not None
     assert overlay.shape == image.shape
     assert not np.array_equal(overlay, image)
-    assert not np.array_equal(overlay[70:96, 80:128], image[70:96, 80:128])
+    inline_tag_pixels = overlay[2:14, 80:128].reshape(-1, 3)
+    assert np.any(np.all(inline_tag_pixels == (0, 0, 255), axis=1))
     sampled_category_colors = {
         tuple(int(channel) for channel in overlay[1, 1]),
         tuple(int(channel) for channel in overlay[10, 70]),

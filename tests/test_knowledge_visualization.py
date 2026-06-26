@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from peace_tool_pool.knowledge import Bounds, KnowledgeBundle, KnowledgeItem
 from peace_tool_pool.knowledge.visualization import (
     KNOWLEDGE_OVERLAY_COLORS_RGB,
@@ -161,6 +163,119 @@ def test_overlay_palette_is_stable_rgb() -> None:
     ]
     assert all(len(item.color_rgb) == 3 for item in overlay.items)
     assert all(0 <= channel <= 255 for item in overlay.items for channel in item.color_rgb)
+
+
+def _bundle_with_stray_results() -> KnowledgeBundle:
+    """A bundle whose target bounds sit in the US Midwest, plus two annotations
+    that have strayed far outside (the signature of a CRS/coordinate misalignment)."""
+
+    return KnowledgeBundle(
+        bounds=Bounds(min_lon=-100.0, min_lat=40.0, max_lon=-90.0, max_lat=50.0),
+        items=[
+            KnowledgeItem(
+                id="earthquake_history:earthquake_history",
+                key="earthquake_history",
+                provider="earthquake_history",
+                value=[
+                    {"place": "Inside", "longitude": -95.0, "latitude": 45.0, "mag": 4.0},
+                    {"place": "Strayed", "longitude": 0.0, "latitude": 0.0, "mag": 4.0},
+                ],
+            ),
+            KnowledgeItem(
+                id="active_faults:active_faults",
+                key="active_faults",
+                provider="active_faults",
+                value=[
+                    # Crosses the western edge of the target -> still relevant, kept.
+                    {"name": "Crossing Fault", "geometry_bbox": [-101.0, 44.0, -98.0, 46.0]},
+                    # Entirely outside -> hidden.
+                    {"name": "Far Fault", "geometry_bbox": [10.0, 10.0, 12.0, 12.0]},
+                ],
+            ),
+        ],
+        selected_item_ids=None,
+        warnings=[],
+        provider_versions={},
+        trace={
+            "bounds_parts": [
+                {
+                    "min_lon": -100.0,
+                    "min_lat": 40.0,
+                    "max_lon": -90.0,
+                    "max_lat": 50.0,
+                    "crs": "EPSG:4326",
+                }
+            ],
+            "raw_extent": None,
+        },
+    )
+
+
+def test_extract_overlay_hides_out_of_bounds_results_and_warns() -> None:
+    with pytest.warns(UserWarning, match="outside the target map bounds"):
+        overlay = extract_knowledge_overlay(_bundle_with_stray_results())
+
+    plotted = {
+        item.label for item in overlay.items if item.kind in {"result_point", "result_bbox"}
+    }
+    assert "Inside" in plotted
+    assert "Crossing Fault" in plotted  # intersects the target edge -> kept
+    assert "Strayed" not in plotted
+    assert "Far Fault" not in plotted
+
+    dropped = {item.label for item in overlay.out_of_bounds}
+    assert dropped == {"Strayed", "Far Fault"}
+    assert overlay.warnings
+    assert any("misalign" in message.lower() for message in overlay.warnings)
+
+
+def test_extract_overlay_frame_anchors_to_target_not_strays() -> None:
+    with pytest.warns(UserWarning):
+        overlay = extract_knowledge_overlay(_bundle_with_stray_results())
+
+    assert overlay.frame.bounds is not None
+    # The strayed (0, 0) point must NOT expand the frame off the target region.
+    assert overlay.frame.bounds.min_lon == -100.0
+    assert overlay.frame.bounds.max_lon == -90.0
+    assert overlay.frame.bounds.min_lat == 40.0
+    assert overlay.frame.bounds.max_lat == 50.0
+
+
+def test_extract_overlay_without_target_bounds_keeps_all_results() -> None:
+    bundle = KnowledgeBundle(
+        bounds=None,
+        items=[
+            KnowledgeItem(
+                id="earthquake_history:earthquake_history",
+                key="earthquake_history",
+                provider="earthquake_history",
+                value=[{"place": "Anywhere", "longitude": 0.0, "latitude": 0.0}],
+            )
+        ],
+        selected_item_ids=None,
+        warnings=[],
+        provider_versions={},
+        trace=None,
+    )
+
+    overlay = extract_knowledge_overlay(bundle)
+
+    assert any(item.label == "Anywhere" for item in overlay.items)
+    assert overlay.out_of_bounds == []
+    assert overlay.warnings == []
+
+
+def test_render_overlay_notes_hidden_out_of_bounds(tmp_path: Path) -> None:
+    with pytest.warns(UserWarning):
+        overlay = extract_knowledge_overlay(_bundle_with_stray_results())
+    output_path = tmp_path / "guarded_overlay.svg"
+
+    render_knowledge_overlay_svg(overlay, output_path, title="Guarded overlay")
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "Strayed" not in text
+    assert "Far Fault" not in text
+    assert "outside the target map bounds" in text
 
 
 def test_render_overlay_svg_writes_visual_artifact(tmp_path: Path) -> None:

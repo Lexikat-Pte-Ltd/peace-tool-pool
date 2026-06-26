@@ -46,6 +46,7 @@ class KnowledgeConfig:
     data_root: Path
     knowledge_root: Path
     cache_root: Path
+    knowledge_sources_root: Path | None = None
     cache_namespace: str = "knowledge"
     earthquake_csv_path: Path | None = None
     active_fault_geojson_path: Path | None = None
@@ -55,6 +56,10 @@ class KnowledgeConfig:
     k2_usage_path: Path | None = None
     k2_expertise_path: Path | None = None
     earthengine_project: str | None = None
+    earthquake_source_id: str = "usgs_fdsn_events"
+    active_fault_source_id: str = "gem_global_active_faults"
+    mineral_occurrence_source_id: str = "ontario_mineral_deposit_inventory"
+    gem_active_fault_version: str | None = None
     earthquake_engine: str = "auto"
     fault_geometry_engine: str = "auto"
     earthengine_landcover_dataset_id: str = "ESA/WorldCover/v200"
@@ -80,6 +85,9 @@ class KnowledgeConfig:
             knowledge_root=_resolve_path(
                 os.getenv("GEOMAP_KNOWLEDGE_ROOT", "./dependencies/knowledge"), root
             ),
+            knowledge_sources_root=_resolve_path(
+                os.getenv("GEOMAP_KNOWLEDGE_SOURCES_ROOT", "./data/knowledge/sources"), root
+            ),
             cache_root=_resolve_path(os.getenv("GEOMAP_CACHE_ROOT", ".cache"), root),
             earthquake_csv_path=_optional_path(os.getenv("GEOMAP_EARTHQUAKE_CSV"), root),
             active_fault_geojson_path=_optional_path(os.getenv("GEOMAP_ACTIVE_FAULT_GEOJSON"), root),
@@ -89,6 +97,14 @@ class KnowledgeConfig:
             k2_usage_path=_optional_path(os.getenv("GEOMAP_K2_USAGE_JSON"), root),
             k2_expertise_path=_optional_path(os.getenv("GEOMAP_K2_EXPERTISE_JSON"), root),
             earthengine_project=os.getenv("GEOMAP_EARTHENGINE_PROJECT") or None,
+            earthquake_source_id=os.getenv("GEOMAP_EARTHQUAKE_SOURCE_ID", "usgs_fdsn_events"),
+            active_fault_source_id=os.getenv(
+                "GEOMAP_ACTIVE_FAULT_SOURCE_ID", "gem_global_active_faults"
+            ),
+            mineral_occurrence_source_id=os.getenv(
+                "GEOMAP_MINERAL_OCCURRENCE_SOURCE_ID", "ontario_mineral_deposit_inventory"
+            ),
+            gem_active_fault_version=os.getenv("GEOMAP_GEM_ACTIVE_FAULT_VERSION") or None,
             earthquake_engine=os.getenv("GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE", "auto"),
             fault_geometry_engine=os.getenv("GEOMAP_KNOWLEDGE_FAULT_GEOMETRY_ENGINE", "auto"),
             earthengine_landcover_dataset_id=os.getenv(
@@ -142,4 +158,4 @@ class KnowledgeConfig:
 
     @property
     def cache_namespace_root(self) -> Path:
-        return self.cache_root / self.cache_namespace / "v1"
+        return self.cache_root / self.cache_namespace / "v2"

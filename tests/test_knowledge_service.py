@@ -5,7 +5,8 @@ import pytest
 
 from peace_tool_pool.knowledge import Bounds, KnowledgeConfig, KnowledgeRequest, KnowledgeService
 from peace_tool_pool.knowledge.cache import write_json_atomic
-from peace_tool_pool.knowledge.errors import MissingAssetError, ProviderError
+from peace_tool_pool.knowledge.errors import MissingAssetError, ProviderError, ProviderOptionError
+from peace_tool_pool.knowledge.sources.manifest import SourceManifest
 from peace_tool_pool.knowledge.types import SCHEMA_VERSION
 
 
@@ -23,6 +24,28 @@ def fixture_config(tmp_path):
         k2_rock_age_path=FIXTURES / "k2_rock_age.json",
         max_records_per_provider=1,
     )
+
+
+def write_manifest(path: Path, *, source_id: str, family: str, artifact: str, sha: str = "abc123"):
+    manifest = SourceManifest(
+        source_id=source_id,
+        family=family,
+        retrieved_at="2026-06-25T00:00:00Z",
+        source_version="fixture-version",
+        normalizer_version="1",
+        source_url="https://example.invalid/source",
+        request={"fixture": True},
+        record_count=1,
+        normalized_sha256=sha,
+        license="fixture license",
+        citation="fixture citation",
+        attribution="fixture attribution",
+        coverage={"status": "fixture", "notes": ["fixture coverage"]},
+        artifacts={"normalized": artifact},
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, manifest.to_dict())
+    return manifest
 
 
 def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
@@ -51,7 +74,7 @@ def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
     assert config.semantic_top_k == 7
     assert config.semantic_min_score == 0.25
     assert config.semantic_local_files_only is True
-    assert config.cache_namespace_root == config.cache_root / "knowledge" / "v1"
+    assert config.cache_namespace_root == config.cache_root / "knowledge" / "v2"
 
 
 def test_service_queries_fixture_providers_enriches_legend_and_writes_cache(tmp_path):
@@ -72,7 +95,8 @@ def test_service_queries_fixture_providers_enriches_legend_and_writes_cache(tmp_
     assert by_key["earthquake_history"][0].record_count == 2
     assert by_key["active_faults"][0].record_count == 2
     assert bundle.provider_versions["rock_type"].startswith("1@sha256:")
-    assert bundle.warnings == []
+    assert any("earthquake_history" in warning for warning in bundle.warnings)
+    assert any("active_faults" in warning for warning in bundle.warnings)
 
     enrichment = service.enrich_legend_label("coarse red sandstone beds")
     assert enrichment.lithology == "red sedimentary"
@@ -98,6 +122,48 @@ def test_service_include_exclude_aliases_and_unknown_warning(tmp_path):
         service.query_bounds(bounds, include=("unknown_provider",))
 
 
+def test_provider_options_validate_before_dispatch_and_affect_cache_key(tmp_path):
+    service = KnowledgeService(config=fixture_config(tmp_path))
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    with pytest.raises(ProviderOptionError):
+        service.query_bounds(
+            bounds,
+            include=("earthquake_history", "active_faults"),
+            provider_options={"earthquake_history": {"not_a_filter": True}},
+        )
+
+    loose = service.query_bounds(
+        bounds,
+        include=("earthquake_history",),
+        provider_options={"earthquake_history": {"minmagnitude": 4.0}},
+    )
+    strict = service.query_bounds(
+        bounds,
+        include=("earthquake_history",),
+        provider_options={"earthquake_history": {"minmagnitude": 5.0}},
+    )
+
+    assert loose.items_by_key()["earthquake_history"][0].record_count == 2
+    assert strict.items_by_key()["earthquake_history"][0].record_count == 1
+    cache_files = list((service.config.cache_namespace_root / "providers" / "earthquake_history").glob("*.json"))
+    assert len(cache_files) == 2
+
+
+def test_provider_options_for_unselected_provider_warn(tmp_path):
+    service = KnowledgeService(config=fixture_config(tmp_path))
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    bundle = service.query_bounds(
+        bounds,
+        include=("earthquake_history",),
+        provider_options={"active_faults": {"source_mode": "local_mirror"}},
+    )
+
+    assert bundle.items_by_key()["earthquake_history"]
+    assert any("active_faults" in warning and "not selected" in warning for warning in bundle.warnings)
+
+
 def test_explicit_missing_asset_raises_but_implicit_missing_assets_warn(tmp_path):
     config = KnowledgeConfig(
         data_root=tmp_path / "data",
@@ -114,6 +180,54 @@ def test_explicit_missing_asset_raises_but_implicit_missing_assets_warn(tmp_path
     bundle = service.query_bounds(bounds)
     assert bundle.items == []
     assert any("earthquake_history" in warning for warning in bundle.warnings)
+
+
+def test_default_providers_fall_back_to_legacy_assets_when_mirrors_are_missing(tmp_path):
+    service = KnowledgeService(config=fixture_config(tmp_path))
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    bundle = service.query_bounds(bounds, include=("earthquake_history", "active_faults"))
+
+    assert bundle.items_by_key()["earthquake_history"][0].provenance["source_mode"] == "legacy_asset"
+    assert bundle.items_by_key()["active_faults"][0].provenance["source_mode"] == "legacy_asset"
+    assert any("legacy local asset" in warning for warning in bundle.warnings)
+
+
+def test_default_providers_use_source_mirrors_when_present(tmp_path):
+    config = fixture_config(tmp_path)
+    config.knowledge_sources_root = tmp_path / "sources"
+    eq_root = config.knowledge_sources_root / "usgs_fdsn_events" / "default"
+    fault_root = config.knowledge_sources_root / "gem_global_active_faults" / "default"
+    eq_normalized = eq_root / "normalized" / "earthquakes.csv"
+    fault_normalized = fault_root / "normalized" / "faults.geojson"
+    eq_normalized.parent.mkdir(parents=True)
+    fault_normalized.parent.mkdir(parents=True)
+    eq_normalized.write_text((FIXTURES / "earthquakes.csv").read_text(encoding="utf-8"), encoding="utf-8")
+    fault_normalized.write_text((FIXTURES / "active_faults.geojson").read_text(encoding="utf-8"), encoding="utf-8")
+    eq_manifest = write_manifest(
+        eq_root / "manifest.json",
+        source_id="usgs_fdsn_events",
+        family="earthquake_events",
+        artifact="normalized/earthquakes.csv",
+    )
+    fault_manifest = write_manifest(
+        fault_root / "manifest.json",
+        source_id="gem_global_active_faults",
+        family="active_faults",
+        artifact="normalized/faults.geojson",
+    )
+
+    service = KnowledgeService(config=config)
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+    bundle = service.query_bounds(bounds, include=("earthquake_history", "active_faults"))
+
+    earthquake = bundle.items_by_key()["earthquake_history"][0]
+    faults = bundle.items_by_key()["active_faults"][0]
+    assert earthquake.provenance["source_mode"] == "local_mirror"
+    assert earthquake.provenance["source_manifest_hash"] == eq_manifest.stable_hash()
+    assert faults.provenance["source_mode"] == "local_mirror"
+    assert faults.provenance["source_manifest_hash"] == fault_manifest.stable_hash()
+    assert bundle.provider_versions["earthquake_history"].startswith("1@manifest:")
 
 
 def test_explicit_partial_missing_asset_warns_and_returns_successful_provider(tmp_path):
@@ -144,6 +258,7 @@ def test_from_env_is_cheap_and_baseline_imports_stay_light(tmp_path, monkeypatch
         "transformers",
         "sentence_transformers",
         "deep_translator",
+        "httpx",
     ):
         sys.modules.pop(module_name, None)
 
@@ -160,8 +275,41 @@ def test_from_env_is_cheap_and_baseline_imports_stay_light(tmp_path, monkeypatch
         "transformers",
         "sentence_transformers",
         "deep_translator",
+        "httpx",
     ):
         assert module_name not in sys.modules
+
+
+def test_query_extent_splits_antimeridian_and_merges_provider_results(tmp_path):
+    earthquake_csv = tmp_path / "earthquakes_antimeridian.csv"
+    earthquake_csv.write_text(
+        "time,latitude,longitude,place,mag,magType,depth,type,updated,gap,ids\n"
+        "2026-01-01T00:00:00Z,0,179.5,East,5.1,mb,10,earthquake,2026-01-02T00:00:00Z,30,quake-a\n"
+        "2026-01-02T00:00:00Z,0,-179.5,West,5.2,mb,11,earthquake,2026-01-03T00:00:00Z,31,quake-b\n"
+        "2026-01-03T00:00:00Z,0,10,Outside,6.0,mb,12,earthquake,2026-01-04T00:00:00Z,32,quake-c\n",
+        encoding="utf-8",
+    )
+    config = fixture_config(tmp_path)
+    config.earthquake_csv_path = earthquake_csv
+    config.active_fault_geojson_path = tmp_path / "missing-faults.geojson"
+    service = KnowledgeService(config=config)
+
+    bundle = service.query_extent(
+        min_lon=170,
+        min_lat=-5,
+        max_lon=-170,
+        max_lat=5,
+        include=("earthquake_history",),
+        max_records=1,
+    )
+
+    item = bundle.items_by_key()["earthquake_history"][0]
+    assert item.record_count == 2
+    assert item.truncated is True
+    assert len(item.value) == 1
+    assert bundle.items_by_id()["earthquake_history:earthquake_history"] == item
+    assert bundle.trace["bounds_parts"][0]["min_lon"] == 170.0
+    assert bundle.trace["bounds_parts"][1]["max_lon"] == -170.0
 
 
 def test_optional_heavy_providers_are_explicit_only(tmp_path):

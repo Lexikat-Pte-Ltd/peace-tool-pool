@@ -56,6 +56,7 @@ def test_service_processes_image_and_writes_peace_metadata(tmp_path):
     assert peace["legend"][0]["color"] == [255, 0, 0]
     assert peace["legend"][0]["color_hex"] == "#FF0000"
     assert peace["legend"][0]["area"] > 0
+    assert result.legend[0].area_fraction > 0
 
     metadata_path = config.cache_namespace_root / "meta" / "sample.json"
     crop_path = config.cache_namespace_root / "det" / "sample" / "main_map_0.png"
@@ -68,6 +69,7 @@ def test_service_processes_image_and_writes_peace_metadata(tmp_path):
     assert overlay is not None
     assert overlay.shape == image.shape
     assert not np.array_equal(overlay, image)
+    assert not np.array_equal(overlay[70:96, 80:128], image[70:96, 80:128])
     sampled_category_colors = {
         tuple(int(channel) for channel in overlay[1, 1]),
         tuple(int(channel) for channel in overlay[10, 70]),

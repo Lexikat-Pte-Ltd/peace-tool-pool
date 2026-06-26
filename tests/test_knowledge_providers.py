@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from peace_tool_pool.knowledge import Bounds, KnowledgeRequest
-from peace_tool_pool.knowledge.errors import MissingAssetError
+from peace_tool_pool.knowledge.errors import MissingAssetError, ProviderOptionError
 from peace_tool_pool.knowledge.providers import earthquakes, faults
 from peace_tool_pool.knowledge.providers.earthquakes import EarthquakeHistoryProvider
 from peace_tool_pool.knowledge.providers.faults import ActiveFaultProvider
@@ -78,6 +78,32 @@ def test_earthquake_provider_tolerates_missing_optional_columns():
     ]
 
 
+def test_earthquake_provider_validates_and_applies_provider_options():
+    provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv", default_max_records=50)
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    item = provider.query(
+        KnowledgeRequest(
+            bounds=bounds,
+            provider_options={"earthquake_history": {"starttime": "2021-01-01", "minmagnitude": "5.0"}},
+        )
+    )[0]
+
+    assert item.record_count == 1
+    assert item.value[0]["place"] == "Newer in bounds"
+    assert item.provenance["provider_options"]["minmagnitude"] == 5.0
+
+    with pytest.raises(ProviderOptionError):
+        provider.validate_options({"bogus": True})
+
+
+def test_earthquake_provider_live_source_version_is_request_specific(tmp_path):
+    provider = EarthquakeHistoryProvider(tmp_path / "missing.csv")
+
+    assert provider.source_version_for_options({"source_mode": "live"}).startswith("1@live:")
+    assert provider.source_version().startswith("1@missing:")
+
+
 def test_earthquake_provider_cache_config_records_resolved_auto_engine(monkeypatch):
     monkeypatch.setattr(earthquakes, "_dependency_available", lambda name: name == "pandas")
     provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv", engine="auto")
@@ -124,6 +150,25 @@ def test_fault_provider_filters_geojson_and_truncates():
     ]
 
 
+def test_fault_provider_rejects_live_mode_and_warns_on_zero_result_gap():
+    provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson", default_max_records=1)
+
+    with pytest.raises(ProviderOptionError):
+        provider.validate_options({"source_mode": "live"})
+
+    item = provider.query(
+        KnowledgeRequest(
+            bounds=Bounds(min_lon=43, min_lat=-26, max_lon=51, max_lat=-11),
+            provider_options={"active_faults": {"source_mode": "local_mirror"}},
+        )
+    )[0]
+
+    assert item.record_count == 0
+    assert any("madagascar" in warning.lower() for warning in provider.last_warnings)
+    assert any("not evidence" in warning for warning in provider.last_warnings)
+    assert item.provenance["coverage_caveats"]
+
+
 def test_fault_provider_cache_config_records_resolved_auto_engine(monkeypatch):
     monkeypatch.setattr(faults, "_dependency_available", lambda name: name == "shapely")
     provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson", geometry_engine="auto")
@@ -142,3 +187,30 @@ def test_file_backed_providers_raise_for_missing_assets(tmp_path):
 
     with pytest.raises(MissingAssetError):
         provider.query(KnowledgeRequest(bounds=bounds))
+
+
+def test_fault_provider_legacy_provenance_carries_gem_attribution():
+    """Legacy bundled GEM data is still GEM-derived; its CC BY-SA attribution must survive."""
+    provider = ActiveFaultProvider(FIXTURES / "active_faults.geojson")
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    provenance = provider.query(KnowledgeRequest(bounds=bounds))[0].provenance
+
+    assert provenance["source_mode"] == "legacy_asset"
+    assert provenance["license"] == (
+        "CC BY-SA 4.0 (Creative Commons Attribution Share Alike 4.0 International)"
+    )
+    assert provenance["citation"] == "GEM Global Active Faults Database"
+    assert "GEM" in (provenance["attribution"] or "")
+
+
+def test_earthquake_provider_legacy_provenance_carries_usgs_attribution():
+    provider = EarthquakeHistoryProvider(FIXTURES / "earthquakes.csv")
+    bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
+
+    provenance = provider.query(KnowledgeRequest(bounds=bounds))[0].provenance
+
+    assert provenance["source_mode"] == "legacy_asset"
+    assert provenance["license"] == "See USGS source policy"
+    assert provenance["citation"] == "USGS FDSN Event API"
+    assert "USGS" in (provenance["attribution"] or "")

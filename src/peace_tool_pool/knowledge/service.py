@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .bounds import Bounds
+from .bounds import Bounds, split_antimeridian
 from .cache import KnowledgeCache, stable_hash
 from .config import KnowledgeConfig
-from .errors import MissingAssetError, OptionalDependencyError, ProviderError
+from .errors import MissingAssetError, OptionalDependencyError, ProviderError, ProviderOptionError
 from .providers.earthengine import (
     EarthEngineLandcoverProvider,
     EarthEnginePopulationDensityProvider,
@@ -19,6 +19,7 @@ from .providers.earthquakes import EarthquakeHistoryProvider
 from .providers.faults import ActiveFaultProvider
 from .providers.rock import RockLookupProvider
 from .providers.semantic_k2 import SemanticK2Provider, SentenceTransformerSemanticBackend
+from .sources.manifest import SourceManifest, find_latest_manifest
 from .types import KnowledgeBundle, KnowledgeItem, KnowledgeRequest, LegendEnrichment
 
 
@@ -58,8 +59,19 @@ class KnowledgeService:
         return cls(config=KnowledgeConfig.from_env(base_dir=base_dir))
 
     def query(self, request: KnowledgeRequest) -> KnowledgeBundle:
+        bounds_parts = [request.bounds] if request.bounds is not None else []
+        return self._query(request, bounds_parts=bounds_parts, raw_extent=None)
+
+    def _query(
+        self,
+        request: KnowledgeRequest,
+        *,
+        bounds_parts: list[Bounds],
+        raw_extent: dict[str, Any] | None,
+    ) -> KnowledgeBundle:
         warnings: list[str] = []
         registrations, explicit_ids = self._select_registrations(request, warnings)
+        request = self._request_with_validated_provider_options(request, registrations, warnings)
         items: list[KnowledgeItem] = []
         provider_versions: dict[str, str] = {}
         trace_events: list[dict[str, Any]] = []
@@ -70,18 +82,31 @@ class KnowledgeService:
             explicit = registration.id in explicit_ids
             try:
                 provider = self._provider_for_registration(registration)
-                provider_items = self._query_provider(provider, request)
+                provider_items, provider_version, cache_hit = self._query_provider(
+                    provider,
+                    request,
+                    bounds_parts=bounds_parts,
+                )
                 items.extend(provider_items)
+                warnings.extend(getattr(provider, "last_warnings", []) or [])
                 if explicit:
                     explicit_success_ids.add(registration.id)
-                provider_versions[provider.id] = self._provider_version(provider)
+                provider_versions[provider.id] = provider_version
                 trace_events.append(
                     {
                         "provider": provider.id,
+                        "source_id": getattr(provider, "source_id", None),
+                        "source_mode": getattr(provider, "source_mode", None),
+                        "source_version": provider_version,
+                        "cache_hit": cache_hit,
                         "record_count": sum(item.record_count or 0 for item in provider_items),
                         "truncated": any(item.truncated for item in provider_items),
+                        "parts": len(bounds_parts),
+                        "warning_count": len(getattr(provider, "last_warnings", []) or []),
                     }
                 )
+            except ProviderOptionError:
+                raise
             except (MissingAssetError, OptionalDependencyError) as exc:
                 if explicit:
                     explicit_failures.append((registration.id, exc))
@@ -101,9 +126,14 @@ class KnowledgeService:
         if explicit_ids and not explicit_success_ids and explicit_failures:
             raise explicit_failures[0][1]
 
-        trace = {"trace_id": request.trace_id, "providers": trace_events}
+        trace = {
+            "trace_id": request.trace_id,
+            "providers": trace_events,
+            "bounds_parts": [part.to_dict() for part in bounds_parts],
+            "raw_extent": raw_extent,
+        }
         return KnowledgeBundle(
-            bounds=request.bounds,
+            bounds=request.bounds if len(bounds_parts) <= 1 else None,
             items=items,
             selected_item_ids=None,
             warnings=warnings,
@@ -117,6 +147,7 @@ class KnowledgeService:
         include: tuple[str, ...] = (),
         exclude: tuple[str, ...] = (),
         max_records: int | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
     ) -> KnowledgeBundle:
         return self.query(
             KnowledgeRequest(
@@ -124,8 +155,38 @@ class KnowledgeService:
                 include=include,
                 exclude=exclude,
                 max_records=max_records,
+                provider_options=provider_options or {},
             )
         )
+
+    def query_extent(
+        self,
+        *,
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        include: tuple[str, ...] = (),
+        exclude: tuple[str, ...] = (),
+        max_records: int | None = None,
+        provider_options: dict[str, dict[str, Any]] | None = None,
+    ) -> KnowledgeBundle:
+        parts = split_antimeridian(min_lon, min_lat, max_lon, max_lat)
+        request = KnowledgeRequest(
+            bounds=parts[0],
+            include=include,
+            exclude=exclude,
+            max_records=max_records,
+            provider_options=provider_options or {},
+        )
+        raw_extent = {
+            "min_lon": float(min_lon),
+            "min_lat": float(min_lat),
+            "max_lon": float(max_lon),
+            "max_lat": float(max_lat),
+            "crs": parts[0].crs,
+        }
+        return self._query(request, bounds_parts=parts, raw_extent=raw_extent)
 
     def enrich_legend_label(self, label: str) -> LegendEnrichment:
         bundle = self.query(
@@ -256,23 +317,23 @@ class KnowledgeService:
                 id="earthquake_history",
                 name="Earthquake history",
                 output_keys=("earthquake_history",),
-                factory=lambda: EarthquakeHistoryProvider(
-                    self.config.resolved_earthquake_csv_path,
-                    default_max_records=self.config.max_records_per_provider,
-                    engine=self.config.earthquake_engine,
-                ),
+                factory=self._earthquake_provider_factory,
                 supports=lambda request: request.bounds is not None,
             ),
             ProviderRegistration(
                 id="active_faults",
                 name="Active faults",
                 output_keys=("active_faults",),
-                factory=lambda: ActiveFaultProvider(
-                    self.config.resolved_active_fault_geojson_path,
-                    default_max_records=self.config.max_records_per_provider,
-                    geometry_engine=self.config.fault_geometry_engine,
-                ),
+                factory=self._active_fault_provider_factory,
                 supports=lambda request: request.bounds is not None,
+            ),
+            ProviderRegistration(
+                id="mineral_occurrences",
+                name="Mineral occurrences",
+                output_keys=("mineral_occurrences",),
+                factory=self._mineral_occurrence_provider_factory,
+                supports=lambda request: request.bounds is not None,
+                default_enabled=False,
             ),
             ProviderRegistration(
                 id="landcover_distribution",
@@ -373,6 +434,102 @@ class KnowledgeService:
                 default_enabled=False,
             ),
         ]
+
+    def _earthquake_provider_factory(self) -> EarthquakeHistoryProvider:
+        manifest_path = self._latest_manifest_path(self.config.earthquake_source_id)
+        if manifest_path is not None:
+            manifest = SourceManifest.from_path(manifest_path)
+            artifact_path = manifest.normalized_artifact_path(manifest_path)
+            if artifact_path.exists():
+                return EarthquakeHistoryProvider(
+                    artifact_path,
+                    default_max_records=self.config.max_records_per_provider,
+                    engine=self.config.earthquake_engine,
+                    source_id=self.config.earthquake_source_id,
+                    source_mode="local_mirror",
+                    source_manifest_path=manifest_path,
+                    source_manifest=manifest,
+                )
+        return EarthquakeHistoryProvider(
+            self.config.resolved_earthquake_csv_path,
+            default_max_records=self.config.max_records_per_provider,
+            engine=self.config.earthquake_engine,
+            source_id=self.config.earthquake_source_id,
+            source_mode="legacy_asset",
+            fallback_warning=(
+                "earthquake_history: using legacy local asset because no source mirror was found."
+            ),
+        )
+
+    def _active_fault_provider_factory(self) -> ActiveFaultProvider:
+        manifest_path = self._latest_manifest_path(
+            self.config.active_fault_source_id,
+            preferred_version=self.config.gem_active_fault_version,
+        )
+        if manifest_path is not None:
+            manifest = SourceManifest.from_path(manifest_path)
+            artifact_path = manifest.normalized_artifact_path(manifest_path)
+            if artifact_path.exists():
+                return ActiveFaultProvider(
+                    artifact_path,
+                    default_max_records=self.config.max_records_per_provider,
+                    geometry_engine=self.config.fault_geometry_engine,
+                    source_id=self.config.active_fault_source_id,
+                    source_mode="local_mirror",
+                    source_manifest_path=manifest_path,
+                    source_manifest=manifest,
+                )
+        return ActiveFaultProvider(
+            self.config.resolved_active_fault_geojson_path,
+            default_max_records=self.config.max_records_per_provider,
+            geometry_engine=self.config.fault_geometry_engine,
+            source_id=self.config.active_fault_source_id,
+            source_mode="legacy_asset",
+            fallback_warning=(
+                "active_faults: using legacy local asset because no source mirror was found."
+            ),
+        )
+
+    def _mineral_occurrence_provider_factory(self) -> Any:
+        # Imported here (not at module load) to keep the import graph for the
+        # default service light; the modules are stdlib-only but this matches the
+        # explicit-only nature of the live, network-backed mineral provider.
+        from .providers.minerals import MineralOccurrenceProvider
+        from .sources.ogs_minerals import OgsMineralOccurrenceAdapter
+        from .sources.registry import default_source_registry
+
+        definition = default_source_registry().get(self.config.mineral_occurrence_source_id)
+        profile = definition.validate_profile(None)
+        coverage_bounds = None
+        raw_coverage = profile.get("coverage_bounds")
+        if raw_coverage:
+            min_lon, min_lat, max_lon, max_lat = raw_coverage
+            coverage_bounds = Bounds(
+                min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat
+            )
+        return MineralOccurrenceProvider(
+            adapter=OgsMineralOccurrenceAdapter(endpoint=profile["endpoint"]),
+            source_id=definition.id,
+            coverage_bounds=coverage_bounds,
+            region_name=str(profile.get("region", "Ontario")),
+            default_max_records=self.config.max_records_per_provider,
+        )
+
+    def _latest_manifest_path(
+        self,
+        source_id: str,
+        preferred_version: str | None = None,
+    ) -> Path | None:
+        if self.config.knowledge_sources_root is None:
+            return None
+        return find_latest_manifest(
+            self.config.knowledge_sources_root,
+            source_id,
+            preferred_version=preferred_version,
+        )
+
+    def refresh_providers(self) -> None:
+        self._provider_instances.clear()
 
     def _semantic_backend_factory(self) -> Callable[[], SentenceTransformerSemanticBackend]:
         backend: SentenceTransformerSemanticBackend | None = None
@@ -480,28 +637,128 @@ class KnowledgeService:
             deduped.append(registration)
         return deduped
 
+    def _request_with_validated_provider_options(
+        self,
+        request: KnowledgeRequest,
+        registrations: list[ProviderRegistration],
+        warnings: list[str],
+    ) -> KnowledgeRequest:
+        if not request.provider_options:
+            return request
+        selected_ids = {registration.id for registration in registrations}
+        validated_options: dict[str, dict[str, Any]] = {}
+        for raw_key, raw_options in request.provider_options.items():
+            provider_id = self._provider_id_for_option_key(raw_key)
+            if provider_id is None:
+                message = f"No knowledge provider matched provider_options key {raw_key!r}."
+                if request.include:
+                    raise ProviderOptionError(message)
+                warnings.append(message)
+                continue
+            if provider_id not in selected_ids:
+                warnings.append(
+                    f"provider_options for {provider_id!r} were ignored because the provider "
+                    "was not selected."
+                )
+                continue
+            registration = next(item for item in registrations if item.id == provider_id)
+            provider = self._provider_for_registration(registration)
+            validate_options = getattr(provider, "validate_options", None)
+            if callable(validate_options):
+                validated_options[provider_id] = dict(validate_options(raw_options))
+            else:
+                if raw_options:
+                    raise ProviderOptionError(
+                        f"Provider {provider_id!r} does not accept provider_options."
+                    )
+                validated_options[provider_id] = {}
+        return KnowledgeRequest(
+            bounds=request.bounds,
+            legend_labels=list(request.legend_labels),
+            query_text=request.query_text,
+            include=request.include,
+            exclude=request.exclude,
+            max_records=request.max_records,
+            max_records_by_provider=dict(request.max_records_by_provider),
+            provider_options=validated_options,
+            trace_id=request.trace_id,
+        )
+
+    def _provider_id_for_option_key(self, token: str) -> str | None:
+        normalized = self._normalize_alias(token)
+        matches = [
+            registration.id
+            for registration in self._registrations
+            if normalized in self._registration_aliases(registration)
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
     def _provider_for_registration(self, registration: ProviderRegistration) -> Any:
         if registration.id not in self._provider_instances:
             self._provider_instances[registration.id] = registration.factory()
         return self._provider_instances[registration.id]
 
-    def _query_provider(self, provider: Any, request: KnowledgeRequest) -> list[KnowledgeItem]:
+    def _query_provider(
+        self,
+        provider: Any,
+        request: KnowledgeRequest,
+        *,
+        bounds_parts: list[Bounds],
+    ) -> tuple[list[KnowledgeItem], str, bool]:
+        provider_version = self._provider_version(provider, request)
         if not self.config.write_cache:
-            return provider.query(request)
-        provider_version = self._provider_version(provider)
-        cache_key = self._provider_cache_key(provider, provider_version, request)
+            return self._query_provider_uncached(provider, request, bounds_parts), provider_version, False
+        cache_key = self._provider_cache_key(provider, provider_version, request, bounds_parts)
         cached = self.cache.read_provider_items(provider.id, cache_key, provider_version)
         if cached is not None:
-            return cached
-        items = provider.query(request)
+            self._prepare_cached_provider_warnings(provider, request, bounds_parts, cached)
+            return cached, provider_version, True
+        items = self._query_provider_uncached(provider, request, bounds_parts)
         self.cache.write_provider_items(provider.id, cache_key, provider_version, items)
-        return items
+        return items, provider_version, False
+
+    def _prepare_cached_provider_warnings(
+        self,
+        provider: Any,
+        request: KnowledgeRequest,
+        bounds_parts: list[Bounds],
+        cached_items: list[KnowledgeItem],
+    ) -> None:
+        warnings_for_cached_result = getattr(provider, "warnings_for_cached_result", None)
+        if callable(warnings_for_cached_result):
+            provider.last_warnings = list(
+                warnings_for_cached_result(request, bounds_parts, cached_items)
+            )
+        elif hasattr(provider, "last_warnings"):
+            provider.last_warnings = []
+
+    def _query_provider_uncached(
+        self,
+        provider: Any,
+        request: KnowledgeRequest,
+        bounds_parts: list[Bounds],
+    ) -> list[KnowledgeItem]:
+        if len(bounds_parts) > 1:
+            query_bounds_parts = getattr(provider, "query_bounds_parts", None)
+            if callable(query_bounds_parts):
+                return list(query_bounds_parts(request, bounds_parts))
+            raise ProviderError(
+                f"Provider {provider.id!r} does not support antimeridian-split extent queries."
+            )
+        if bounds_parts:
+            query_bounds_parts = getattr(provider, "query_bounds_parts", None)
+            if callable(query_bounds_parts):
+                return list(query_bounds_parts(request, bounds_parts))
+        return list(provider.query(request))
 
     def _provider_cache_key(
         self,
         provider: Any,
         provider_version: str,
         request: KnowledgeRequest,
+        bounds_parts: list[Bounds],
     ) -> str:
         query_hash = stable_hash(request.query_text) if request.query_text is not None else None
         return stable_hash(
@@ -510,13 +767,17 @@ class KnowledgeService:
                 "provider_version": provider_version,
                 "provider_config": self._provider_cache_config(provider),
                 "source_asset_path": str(getattr(provider, "asset_path", "")) or None,
-                "bounds": request.bounds.to_cache_dict(self.config.bounds_cache_precision)
-                if request.bounds is not None
-                else None,
+                "bounds_parts": [
+                    part.to_cache_dict(self.config.bounds_cache_precision) for part in bounds_parts
+                ],
                 "legend_labels": list(request.legend_labels),
                 "query_text_hash": query_hash,
                 "max_records": request.max_records,
                 "max_records_by_provider": dict(request.max_records_by_provider),
+                "provider_options": {
+                    provider_id: dict(options)
+                    for provider_id, options in request.provider_options.items()
+                },
                 "default_max_records": self.config.max_records_per_provider,
             }
         )
@@ -527,7 +788,11 @@ class KnowledgeService:
             return None
         return dict(cache_config_method())
 
-    def _provider_version(self, provider: Any) -> str:
+    def _provider_version(self, provider: Any, request: KnowledgeRequest | None = None) -> str:
+        source_version_for_options = getattr(provider, "source_version_for_options", None)
+        if callable(source_version_for_options) and request is not None:
+            options = request.provider_options.get(getattr(provider, "id", ""), {})
+            return str(source_version_for_options(options))
         source_version_method = getattr(provider, "source_version", None)
         if source_version_method is not None:
             return str(source_version_method())

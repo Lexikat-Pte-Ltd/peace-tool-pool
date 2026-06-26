@@ -1,0 +1,105 @@
+import pytest
+
+from peace_tool_pool.map_processing import image_ops
+from peace_tool_pool.map_processing.types import Detection, LegendEntry
+
+cv2 = pytest.importorskip("cv2")
+np = pytest.importorskip("numpy")
+
+
+def test_annotate_detections_empty_legend_entries_is_noop(tmp_path):
+    image = np.full((80, 120, 3), 255, dtype=np.uint8)
+    detections = {
+        "main_map": [Detection(label="main_map", bbox=(5, 5, 80, 60), confidence=0.9)]
+    }
+    baseline_path = tmp_path / "baseline.png"
+    empty_legend_path = tmp_path / "empty_legend.png"
+
+    image_ops.annotate_detections_on_image(image, detections, baseline_path)
+    image_ops.annotate_detections_on_image(
+        image,
+        detections,
+        empty_legend_path,
+        legend_entries=[],
+    )
+
+    baseline = cv2.imread(str(baseline_path))
+    empty_legend = cv2.imread(str(empty_legend_path))
+    assert baseline is not None
+    assert empty_legend is not None
+    assert np.array_equal(empty_legend, baseline)
+
+
+def test_annotate_detections_draws_legend_entries_and_bottom_right_panel(tmp_path):
+    image = np.full((140, 220, 3), 255, dtype=np.uint8)
+    detections = {
+        "main_map": [Detection(label="main_map", bbox=(5, 5, 95, 95), confidence=0.92)]
+    }
+    legend_entries = [
+        LegendEntry(
+            id=0,
+            color_bbox=(120, 20, 135, 35),
+            text_bbox=(142, 20, 185, 35),
+            color_rgb=(255, 0, 0),
+            color_hex="#FF0000",
+            color_name="Red",
+            area_fraction=0.125,
+        ),
+        LegendEntry(
+            id=1,
+            color_bbox=(120, 45, 135, 60),
+            text_bbox=(142, 45, 185, 60),
+            color_rgb=(0, 255, 0),
+            color_hex="#00FF00",
+            color_name="Green",
+            area_fraction=0.25,
+        ),
+    ]
+    output_path = tmp_path / "legend_overlay.png"
+
+    image_ops.annotate_detections_on_image(
+        image,
+        detections,
+        output_path,
+        legend_entries=legend_entries,
+    )
+
+    overlay = cv2.imread(str(output_path))
+    assert overlay is not None
+    assert overlay.shape == image.shape
+    assert not np.array_equal(overlay[20, 120], image[20, 120])
+    assert not np.array_equal(overlay[20, 142], image[20, 142])
+
+    panel_region = overlay[80:136, 120:216]
+    source_region = image[80:136, 120:216]
+    assert not np.array_equal(panel_region, source_region)
+    panel_pixels = panel_region.reshape(-1, 3)
+    assert np.any(np.all(panel_pixels == (0, 0, 255), axis=1))
+    assert np.any(np.all(panel_pixels == (0, 255, 0), axis=1))
+
+
+def test_annotate_detections_skips_invalid_legend_bboxes(tmp_path):
+    image = np.full((60, 60, 3), 255, dtype=np.uint8)
+    output_path = tmp_path / "invalid_legend_overlay.png"
+    legend_entries = [
+        LegendEntry(
+            id=0,
+            color_bbox=(80, 80, 90, 90),
+            text_bbox=(10, 10, 10, 20),
+            color_rgb=(255, 0, 0),
+            color_hex="#FF0000",
+            color_name="Red",
+            area_fraction=0.0,
+        )
+    ]
+
+    image_ops.annotate_detections_on_image(
+        image,
+        {},
+        output_path,
+        legend_entries=legend_entries,
+    )
+
+    overlay = cv2.imread(str(output_path))
+    assert overlay is not None
+    assert overlay.shape == image.shape

@@ -8,7 +8,7 @@ from typing import Any
 from .bounds import Bounds
 
 
-SCHEMA_VERSION = "knowledge/v1"
+SCHEMA_VERSION = "knowledge/v2"
 
 
 @dataclass
@@ -20,6 +20,7 @@ class KnowledgeRequest:
     exclude: tuple[str, ...] = ()
     max_records: int | None = None
     max_records_by_provider: dict[str, int] = field(default_factory=dict)
+    provider_options: dict[str, dict[str, Any]] = field(default_factory=dict)
     trace_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -28,6 +29,10 @@ class KnowledgeRequest:
         self.exclude = tuple(str(item) for item in self.exclude)
         self.max_records_by_provider = {
             str(provider): int(limit) for provider, limit in self.max_records_by_provider.items()
+        }
+        self.provider_options = {
+            str(provider): dict(options or {})
+            for provider, options in self.provider_options.items()
         }
         if self.max_records is not None:
             self.max_records = int(self.max_records)
@@ -41,6 +46,9 @@ class KnowledgeRequest:
             "exclude": list(self.exclude),
             "max_records": self.max_records,
             "max_records_by_provider": dict(self.max_records_by_provider),
+            "provider_options": {
+                provider: dict(options) for provider, options in self.provider_options.items()
+            },
             "trace_id": self.trace_id,
         }
 

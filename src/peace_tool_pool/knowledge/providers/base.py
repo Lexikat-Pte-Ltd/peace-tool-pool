@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Mapping, Protocol
+
+from ..bounds import Bounds
 
 from ..errors import MissingAssetError
 from ..types import KnowledgeItem, KnowledgeRequest
@@ -20,6 +22,16 @@ class KnowledgeProvider(Protocol):
 
     def query(self, request: KnowledgeRequest) -> list[KnowledgeItem]:
         """Return knowledge items for the request."""
+
+    def validate_options(self, options: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate provider-specific request options."""
+
+    def query_bounds_parts(
+        self,
+        request: KnowledgeRequest,
+        bounds_parts: list[Bounds],
+    ) -> list[KnowledgeItem]:
+        """Return one merged item for already-normalized bounds parts."""
 
 
 def file_sha256_digest(path: str | Path, prefix: int = 12) -> str:

@@ -9,6 +9,7 @@ from peace_tool_pool.knowledge import (
     KNOWLEDGE_BUNDLE_SCHEMA,
     SCHEMA_VERSION,
 )
+from peace_tool_pool.knowledge.bounds import split_antimeridian
 from peace_tool_pool.knowledge.errors import InvalidBoundsError
 
 
@@ -35,6 +36,18 @@ def test_bounds_validation_normalizes_crs_and_serializes():
         Bounds(min_lon=0, min_lat=0, max_lon=1, max_lat=1, crs="EPSG:3857")
 
 
+def test_split_antimeridian_keeps_bounds_non_wrapping():
+    parts = split_antimeridian(min_lon=170, min_lat=-10, max_lon=-170, max_lat=10)
+
+    assert [part.to_dict() for part in parts] == [
+        {"min_lon": 170.0, "min_lat": -10.0, "max_lon": 180.0, "max_lat": 10.0, "crs": "EPSG:4326"},
+        {"min_lon": -180.0, "min_lat": -10.0, "max_lon": -170.0, "max_lat": 10.0, "crs": "EPSG:4326"},
+    ]
+    assert split_antimeridian(min_lon=-10, min_lat=0, max_lon=10, max_lat=1) == [
+        Bounds(min_lon=-10, min_lat=0, max_lon=10, max_lat=1)
+    ]
+
+
 def test_request_bundle_and_enrichment_serialization():
     bounds = Bounds(min_lon=-122, min_lat=37, max_lon=-121, max_lat=38)
     request = KnowledgeRequest(
@@ -44,11 +57,16 @@ def test_request_bundle_and_enrichment_serialization():
         exclude=["active-faults"],
         max_records=3,
         max_records_by_provider={"earthquake_history": 1},
+        provider_options={"earthquake_history": {"minmagnitude": "4.5"}},
         trace_id="trace-1",
     )
     assert request.include == ("Rock Type",)
     assert request.exclude == ("active-faults",)
+    assert request.provider_options == {"earthquake_history": {"minmagnitude": "4.5"}}
     assert request.to_dict()["bounds"] == bounds.to_dict()
+    assert request.to_dict()["provider_options"] == {
+        "earthquake_history": {"minmagnitude": "4.5"}
+    }
 
     item = KnowledgeItem(
         id="rock_type:rock_type",
@@ -87,5 +105,5 @@ def test_request_bundle_and_enrichment_serialization():
 
 def test_knowledge_schema_constant_is_stable():
     assert KNOWLEDGE_BUNDLE_SCHEMA["type"] == "object"
-    assert KNOWLEDGE_BUNDLE_SCHEMA["properties"]["schema_version"]["const"] == "knowledge/v1"
+    assert KNOWLEDGE_BUNDLE_SCHEMA["properties"]["schema_version"]["const"] == "knowledge/v2"
     assert "items" in KNOWLEDGE_BUNDLE_SCHEMA["required"]

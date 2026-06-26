@@ -49,9 +49,9 @@ class MapProcessingService:
         )
 
         region_artifacts = self._write_component_artifacts(image, result)
-        self._write_detection_overlay(image, result)
         self._extract_legend(result, region_artifacts)
         self._estimate_areas(result, region_artifacts)
+        self._write_detection_overlay(image, result)
 
         if self.config.write_cache:
             self.cache.save_result(result)
@@ -87,7 +87,12 @@ class MapProcessingService:
 
     def _write_detection_overlay(self, image: Any, result: MapProcessingResult) -> None:
         artifact_path = self.cache.visualization_path(result.name)
-        image_ops.annotate_detections_on_image(image, result.regions, artifact_path)
+        image_ops.annotate_detections_on_image(
+            image,
+            result.regions,
+            artifact_path,
+            legend_entries=result.legend,
+        )
         result.artifacts.append(
             ArtifactRef(
                 path=artifact_path,

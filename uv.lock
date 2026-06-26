@@ -1332,6 +1332,9 @@ knowledge-local = [
     { name = "pandas" },
     { name = "shapely" },
 ]
+knowledge-network = [
+    { name = "httpx" },
+]
 knowledge-semantic = [
     { name = "sentence-transformers" },
     { name = "torch", version = "2.12.1", source = { registry = "https://pypi.org/simple" } },
@@ -1349,6 +1352,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "earthengine-api", marker = "extra == 'knowledge-earthengine'", specifier = ">=1,<2" },
+    { name = "httpx", marker = "extra == 'knowledge-network'", specifier = ">=0.27,<1" },
     { name = "huggingface-hub", marker = "extra == 'detectors'", specifier = ">=0.24,<1" },
     { name = "matplotlib", marker = "extra == 'detectors'", specifier = "==3.9.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0,<2" },
@@ -1369,7 +1373,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'detectors'", specifier = "==0.15.2" },
     { name = "tqdm", marker = "extra == 'detectors'", specifier = "==4.66.5" },
 ]
-provides-extras = ["detectors", "knowledge-earthengine", "knowledge-local", "knowledge-semantic", "geo", "mcp"]
+provides-extras = ["detectors", "knowledge-earthengine", "knowledge-local", "knowledge-network", "knowledge-semantic", "geo", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [

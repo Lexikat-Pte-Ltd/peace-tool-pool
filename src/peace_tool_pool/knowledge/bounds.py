@@ -62,3 +62,21 @@ class Bounds:
             "max_lat": round(self.max_lat, precision),
             "crs": self.crs,
         }
+
+
+def split_antimeridian(
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    crs: str = "EPSG:4326",
+) -> list[Bounds]:
+    """Normalize a raw extent into one or two non-wrapping Bounds parts."""
+    min_lon_value = float(min_lon)
+    max_lon_value = float(max_lon)
+    if min_lon_value <= max_lon_value:
+        return [Bounds(min_lon_value, min_lat, max_lon_value, max_lat, crs=crs)]
+    return [
+        Bounds(min_lon_value, min_lat, 180, max_lat, crs=crs),
+        Bounds(-180, min_lat, max_lon_value, max_lat, crs=crs),
+    ]

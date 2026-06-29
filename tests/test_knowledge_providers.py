@@ -5,8 +5,11 @@ import pytest
 from peace_tool_pool.knowledge import Bounds, KnowledgeRequest
 from peace_tool_pool.knowledge.errors import MissingAssetError, ProviderOptionError
 from peace_tool_pool.knowledge.providers import earthquakes, faults
-from peace_tool_pool.knowledge.providers.earthquakes import EarthquakeHistoryProvider
-from peace_tool_pool.knowledge.providers.faults import ActiveFaultProvider
+from peace_tool_pool.knowledge.providers.earthquakes import (
+    EarthquakeHistoryProvider,
+    EarthquakeSourceBinding,
+)
+from peace_tool_pool.knowledge.providers.faults import ActiveFaultProvider, FaultSourceBinding
 from peace_tool_pool.knowledge.providers.rock import RockLookupProvider
 
 
@@ -97,6 +100,93 @@ def test_earthquake_provider_validates_and_applies_provider_options():
         provider.validate_options({"bogus": True})
 
 
+def test_earthquake_provider_federates_selected_sources_with_exact_id_dedupe(tmp_path):
+    usgs_csv = tmp_path / "usgs.csv"
+    emsc_csv = tmp_path / "emsc.csv"
+    header = "time,latitude,longitude,place,mag,magType,depth,type,updated,gap,ids,sources\n"
+    usgs_csv.write_text(
+        header
+        + "2026-01-01T00:00:00Z,41.5,12.5,USGS event,5.1,mw,10,earthquake,2026-01-02T00:00:00Z,20,shared-a,us\n",
+        encoding="utf-8",
+    )
+    emsc_csv.write_text(
+        header
+        + "2026-01-01T00:00:01Z,41.5,12.5,EMSC event,5.1,mw,10,earthquake,2026-01-02T00:00:00Z,20,shared-a,emsc\n",
+        encoding="utf-8",
+    )
+    provider = EarthquakeHistoryProvider(
+        usgs_csv,
+        source_bindings=[
+            EarthquakeSourceBinding(
+                source_id="usgs_fdsn_events",
+                source_mode="legacy_asset",
+                asset_path=usgs_csv,
+            ),
+            EarthquakeSourceBinding(
+                source_id="emsc_fdsn_events",
+                source_mode="legacy_asset",
+                asset_path=emsc_csv,
+            ),
+        ],
+    )
+
+    item = provider.query(
+        KnowledgeRequest(
+            bounds=Bounds(min_lon=12, min_lat=41, max_lon=13, max_lat=42),
+            provider_options={
+                "earthquake_history": {"sources": ["usgs_fdsn_events", "emsc_fdsn_events"]}
+            },
+        )
+    )[0]
+
+    assert item.record_count == 1
+    assert item.value[0]["place"] == "EMSC event"
+    assert item.provenance["source_ids"] == ["usgs_fdsn_events", "emsc_fdsn_events"]
+    assert len(item.provenance["sources"]) == 2
+    assert item.provenance["dedupe_key"] == "association_set_overlap_exact"
+
+
+def test_earthquake_provider_does_not_fuzzy_merge_cross_catalog_events(tmp_path):
+    usgs_csv = tmp_path / "usgs.csv"
+    emsc_csv = tmp_path / "emsc.csv"
+    header = "time,latitude,longitude,place,mag,magType,depth,type,updated,gap,ids,sources\n"
+    usgs_csv.write_text(
+        header
+        + "2026-01-01T00:00:00Z,41.500,12.500,USGS event,5.1,mw,10,earthquake,2026-01-02T00:00:00Z,20,us-a,us\n",
+        encoding="utf-8",
+    )
+    emsc_csv.write_text(
+        header
+        + "2026-01-01T00:00:05Z,41.501,12.501,EMSC event,5.1,mw,10,earthquake,2026-01-02T00:00:00Z,20,emsc-a,emsc\n",
+        encoding="utf-8",
+    )
+    provider = EarthquakeHistoryProvider(
+        usgs_csv,
+        source_bindings=[
+            EarthquakeSourceBinding(
+                source_id="usgs_fdsn_events",
+                source_mode="legacy_asset",
+                asset_path=usgs_csv,
+            ),
+            EarthquakeSourceBinding(
+                source_id="emsc_fdsn_events",
+                source_mode="legacy_asset",
+                asset_path=emsc_csv,
+            ),
+        ],
+    )
+
+    item = provider.query(
+        KnowledgeRequest(
+            bounds=Bounds(min_lon=12, min_lat=41, max_lon=13, max_lat=42),
+            provider_options={"earthquake_history": {"source": "all"}},
+        )
+    )[0]
+
+    assert item.record_count == 2
+    assert item.provenance["dedupe_key"] == "association_set_overlap_exact"
+
+
 def test_earthquake_provider_live_source_version_is_request_specific(tmp_path):
     provider = EarthquakeHistoryProvider(tmp_path / "missing.csv")
 
@@ -167,6 +257,61 @@ def test_fault_provider_rejects_live_mode_and_warns_on_zero_result_gap():
     assert any("madagascar" in warning.lower() for warning in provider.last_warnings)
     assert any("not evidence" in warning for warning in provider.last_warnings)
     assert item.provenance["coverage_caveats"]
+
+
+def test_fault_provider_supports_explicit_live_diss_binding():
+    class FakeDissAdapter:
+        endpoint = "fixture://diss"
+        normalizer_version = "1"
+
+        def __init__(self):
+            self.calls = []
+
+        def query_bbox(self, bounds):
+            self.calls.append(bounds)
+            return {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"id": "diss-1", "name": "DISS Source"},
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[12.0, 41.0], [13.0, 42.0]],
+                        },
+                    }
+                ],
+            }
+
+        def normalize_geojson(self, data):
+            return data
+
+    adapter = FakeDissAdapter()
+    provider = ActiveFaultProvider(
+        FIXTURES / "active_faults.geojson",
+        source_bindings=[
+            FaultSourceBinding(
+                source_id="diss_seismogenic_sources",
+                source_mode="live",
+                adapter=adapter,
+                supports_live=True,
+                coverage_bounds=Bounds(min_lon=5, min_lat=35, max_lon=20, max_lat=48),
+                region_name="Italy",
+            )
+        ],
+    )
+
+    item = provider.query(
+        KnowledgeRequest(
+            bounds=Bounds(min_lon=12, min_lat=41, max_lon=13, max_lat=42),
+            provider_options={"active_faults": {"source": "diss_seismogenic_sources"}},
+        )
+    )[0]
+
+    assert item.record_count == 1
+    assert adapter.calls
+    assert item.provenance["source_ids"] == ["diss_seismogenic_sources"]
+    assert item.provenance["sources"][0]["source_mode"] == "live"
 
 
 def test_fault_provider_cache_config_records_resolved_auto_engine(monkeypatch):

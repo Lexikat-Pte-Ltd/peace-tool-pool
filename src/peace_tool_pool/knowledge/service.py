@@ -15,8 +15,8 @@ from .providers.earthengine import (
     EarthEngineLandcoverProvider,
     EarthEnginePopulationDensityProvider,
 )
-from .providers.earthquakes import EarthquakeHistoryProvider
-from .providers.faults import ActiveFaultProvider
+from .providers.earthquakes import EarthquakeHistoryProvider, EarthquakeSourceBinding
+from .providers.faults import ActiveFaultProvider, FaultSourceBinding
 from .providers.rock import RockLookupProvider
 from .providers.semantic_k2 import SemanticK2Provider, SentenceTransformerSemanticBackend
 from .sources.manifest import SourceManifest, find_latest_manifest
@@ -92,11 +92,17 @@ class KnowledgeService:
                 if explicit:
                     explicit_success_ids.add(registration.id)
                 provider_versions[provider.id] = provider_version
+                item_provenance = provider_items[0].provenance if provider_items else {}
                 trace_events.append(
                     {
                         "provider": provider.id,
-                        "source_id": getattr(provider, "source_id", None),
-                        "source_mode": getattr(provider, "source_mode", None),
+                        "source_id": item_provenance.get(
+                            "source_id", getattr(provider, "source_id", None)
+                        ),
+                        "source_ids": item_provenance.get("source_ids"),
+                        "source_mode": item_provenance.get(
+                            "source_mode", getattr(provider, "source_mode", None)
+                        ),
                         "source_version": provider_version,
                         "cache_hit": cache_hit,
                         "record_count": sum(item.record_count or 0 for item in provider_items),
@@ -436,55 +442,141 @@ class KnowledgeService:
         ]
 
     def _earthquake_provider_factory(self) -> EarthquakeHistoryProvider:
-        manifest_path = self._latest_manifest_path(self.config.earthquake_source_id)
+        bindings = [
+            binding
+            for source_id in self.config.earthquake_source_ids
+            if (binding := self._earthquake_source_binding(source_id)) is not None
+        ]
+        if not bindings:
+            bindings = [self._legacy_earthquake_binding(self.config.earthquake_source_id)]
+        primary = bindings[0]
+        return EarthquakeHistoryProvider(
+            primary.asset_path or self.config.resolved_earthquake_csv_path,
+            default_max_records=self.config.max_records_per_provider,
+            engine=self.config.earthquake_engine,
+            source_id=primary.source_id,
+            source_mode=primary.source_mode,
+            source_manifest_path=primary.source_manifest_path,
+            source_manifest=primary.source_manifest,
+            fallback_warning=primary.fallback_warning,
+            source_bindings=bindings,
+        )
+
+    def _active_fault_provider_factory(self) -> ActiveFaultProvider:
+        bindings = [
+            binding
+            for source_id in self.config.active_fault_source_ids
+            if (binding := self._active_fault_source_binding(source_id)) is not None
+        ]
+        if not bindings:
+            bindings = [self._legacy_active_fault_binding(self.config.active_fault_source_id)]
+        primary = bindings[0]
+        return ActiveFaultProvider(
+            primary.asset_path or self.config.resolved_active_fault_geojson_path,
+            default_max_records=self.config.max_records_per_provider,
+            geometry_engine=self.config.fault_geometry_engine,
+            source_id=primary.source_id,
+            source_mode=primary.source_mode,
+            source_manifest_path=primary.source_manifest_path,
+            source_manifest=primary.source_manifest,
+            fallback_warning=primary.fallback_warning,
+            source_bindings=bindings,
+        )
+
+    def _earthquake_source_binding(self, source_id: str) -> EarthquakeSourceBinding | None:
+        from .sources.usgs_events import (
+            EMSC_DEFAULT_PROFILE,
+            EMSC_EVENT_BASE_URL,
+            FdsnEventSourceAdapter,
+            UsgsFdsnEventAdapter,
+        )
+
+        manifest_path = self._latest_manifest_path(source_id)
         if manifest_path is not None:
             manifest = SourceManifest.from_path(manifest_path)
             artifact_path = manifest.normalized_artifact_path(manifest_path)
             if artifact_path.exists():
-                return EarthquakeHistoryProvider(
-                    artifact_path,
-                    default_max_records=self.config.max_records_per_provider,
-                    engine=self.config.earthquake_engine,
-                    source_id=self.config.earthquake_source_id,
+                return EarthquakeSourceBinding(
+                    source_id=source_id,
                     source_mode="local_mirror",
+                    asset_path=artifact_path,
                     source_manifest_path=manifest_path,
                     source_manifest=manifest,
+                    supports_live=True,
+                    adapter=UsgsFdsnEventAdapter()
+                    if source_id == "usgs_fdsn_events"
+                    else FdsnEventSourceAdapter(
+                        source_id=source_id,
+                        base_url=EMSC_EVENT_BASE_URL,
+                        default_profile=EMSC_DEFAULT_PROFILE,
+                    ),
                 )
-        return EarthquakeHistoryProvider(
-            self.config.resolved_earthquake_csv_path,
-            default_max_records=self.config.max_records_per_provider,
-            engine=self.config.earthquake_engine,
-            source_id=self.config.earthquake_source_id,
+        if source_id == "usgs_fdsn_events":
+            return self._legacy_earthquake_binding(source_id)
+        if source_id == "emsc_fdsn_events":
+            return EarthquakeSourceBinding(
+                source_id=source_id,
+                source_mode="live",
+                adapter=FdsnEventSourceAdapter(
+                    source_id=source_id,
+                    base_url=EMSC_EVENT_BASE_URL,
+                    default_profile=EMSC_DEFAULT_PROFILE,
+                ),
+                supports_live=True,
+            )
+        return None
+
+    def _legacy_earthquake_binding(self, source_id: str) -> EarthquakeSourceBinding:
+        return EarthquakeSourceBinding(
+            source_id=source_id,
             source_mode="legacy_asset",
+            asset_path=self.config.resolved_earthquake_csv_path,
+            supports_live=source_id == "usgs_fdsn_events",
             fallback_warning=(
                 "earthquake_history: using legacy local asset because no source mirror was found."
             ),
         )
 
-    def _active_fault_provider_factory(self) -> ActiveFaultProvider:
-        manifest_path = self._latest_manifest_path(
-            self.config.active_fault_source_id,
-            preferred_version=self.config.gem_active_fault_version,
+    def _active_fault_source_binding(self, source_id: str) -> FaultSourceBinding | None:
+        from .sources.diss_faults import DissSeismogenicSourceAdapter
+        from .sources.registry import default_source_registry
+
+        preferred_version = (
+            self.config.gem_active_fault_version if source_id == "gem_global_active_faults" else None
         )
+        manifest_path = self._latest_manifest_path(source_id, preferred_version=preferred_version)
         if manifest_path is not None:
             manifest = SourceManifest.from_path(manifest_path)
             artifact_path = manifest.normalized_artifact_path(manifest_path)
             if artifact_path.exists():
-                return ActiveFaultProvider(
-                    artifact_path,
-                    default_max_records=self.config.max_records_per_provider,
-                    geometry_engine=self.config.fault_geometry_engine,
-                    source_id=self.config.active_fault_source_id,
+                return FaultSourceBinding(
+                    source_id=source_id,
                     source_mode="local_mirror",
+                    asset_path=artifact_path,
                     source_manifest_path=manifest_path,
                     source_manifest=manifest,
                 )
-        return ActiveFaultProvider(
-            self.config.resolved_active_fault_geojson_path,
-            default_max_records=self.config.max_records_per_provider,
-            geometry_engine=self.config.fault_geometry_engine,
-            source_id=self.config.active_fault_source_id,
+        if source_id == "gem_global_active_faults":
+            return self._legacy_active_fault_binding(source_id)
+        if source_id == "diss_seismogenic_sources":
+            definition = default_source_registry().get(source_id)
+            profile = definition.validate_profile(None)
+            coverage_bounds = self._bounds_from_tuple(definition.coverage_bounds)
+            return FaultSourceBinding(
+                source_id=source_id,
+                source_mode="live",
+                adapter=DissSeismogenicSourceAdapter(endpoint=profile["endpoint"]),
+                supports_live=True,
+                coverage_bounds=coverage_bounds,
+                region_name="DISS Italy region",
+            )
+        return None
+
+    def _legacy_active_fault_binding(self, source_id: str) -> FaultSourceBinding:
+        return FaultSourceBinding(
+            source_id=source_id,
             source_mode="legacy_asset",
+            asset_path=self.config.resolved_active_fault_geojson_path,
             fallback_warning=(
                 "active_faults: using legacy local asset because no source mirror was found."
             ),
@@ -494,26 +586,71 @@ class KnowledgeService:
         # Imported here (not at module load) to keep the import graph for the
         # default service light; the modules are stdlib-only but this matches the
         # explicit-only nature of the live, network-backed mineral provider.
-        from .providers.minerals import MineralOccurrenceProvider
+        from .providers.minerals import MineralOccurrenceProvider, MineralSourceBinding
         from .sources.ogs_minerals import OgsMineralOccurrenceAdapter
+        from .sources.ogs_minerals import normalize_features as normalize_ogs_features
         from .sources.registry import default_source_registry
-
-        definition = default_source_registry().get(self.config.mineral_occurrence_source_id)
-        profile = definition.validate_profile(None)
-        coverage_bounds = None
-        raw_coverage = profile.get("coverage_bounds")
-        if raw_coverage:
-            min_lon, min_lat, max_lon, max_lat = raw_coverage
-            coverage_bounds = Bounds(
-                min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat
-            )
-        return MineralOccurrenceProvider(
-            adapter=OgsMineralOccurrenceAdapter(endpoint=profile["endpoint"]),
-            source_id=definition.id,
-            coverage_bounds=coverage_bounds,
-            region_name=str(profile.get("region", "Ontario")),
-            default_max_records=self.config.max_records_per_provider,
+        from .sources.sigeom_minerals import (
+            SigeomMineralOccurrenceAdapter,
+            normalize_sigeom_features,
         )
+
+        registry = default_source_registry()
+        bindings: list[MineralSourceBinding] = []
+        for source_id in self.config.mineral_occurrence_source_ids:
+            definition = registry.get(source_id)
+            profile = definition.validate_profile(None)
+            coverage_bounds = self._bounds_from_tuple(definition.coverage_bounds)
+            if source_id == "ontario_mineral_deposit_inventory":
+                bindings.append(
+                    MineralSourceBinding(
+                        source_id=source_id,
+                        adapter=OgsMineralOccurrenceAdapter(endpoint=profile["endpoint"]),
+                        normalize=normalize_ogs_features,
+                        coverage_bounds=coverage_bounds,
+                        region_name=str(profile.get("region", "Ontario")),
+                    )
+                )
+            elif source_id == "sigeom_mineral_occurrences":
+                bindings.append(
+                    MineralSourceBinding(
+                        source_id=source_id,
+                        adapter=SigeomMineralOccurrenceAdapter(endpoint=profile["endpoint"]),
+                        normalize=normalize_sigeom_features,
+                        coverage_bounds=coverage_bounds,
+                        region_name=str(profile.get("region", "Quebec")),
+                    )
+                )
+        if not bindings:
+            definition = registry.get(self.config.mineral_occurrence_source_id)
+            profile = definition.validate_profile(None)
+            bindings = [
+                MineralSourceBinding(
+                    source_id=definition.id,
+                    adapter=OgsMineralOccurrenceAdapter(endpoint=profile["endpoint"]),
+                    normalize=normalize_ogs_features,
+                    coverage_bounds=self._bounds_from_tuple(definition.coverage_bounds),
+                    region_name=str(profile.get("region", "Ontario")),
+                )
+            ]
+        primary = bindings[0]
+        return MineralOccurrenceProvider(
+            adapter=primary.adapter,
+            source_id=primary.source_id,
+            coverage_bounds=primary.coverage_bounds,
+            region_name=primary.region_name,
+            default_max_records=self.config.max_records_per_provider,
+            source_bindings=bindings,
+        )
+
+    def _bounds_from_tuple(
+        self,
+        raw_bounds: tuple[float, float, float, float] | None,
+    ) -> Bounds | None:
+        if raw_bounds is None:
+            return None
+        min_lon, min_lat, max_lon, max_lat = raw_bounds
+        return Bounds(min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat)
 
     def _latest_manifest_path(
         self,

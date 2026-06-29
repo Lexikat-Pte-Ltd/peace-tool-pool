@@ -32,3 +32,7 @@ dependencies/models/**
 dependencies/knowledge/**
 !dependencies/knowledge/.gitkeep
 dependencies/ultralytics/
+
+# Outputs
+*.png
+*.svg

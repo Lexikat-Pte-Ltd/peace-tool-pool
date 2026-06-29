@@ -60,6 +60,12 @@ def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("GEOMAP_SEMANTIC_TOP_K", "7")
     monkeypatch.setenv("GEOMAP_SEMANTIC_MIN_SCORE", "0.25")
     monkeypatch.setenv("GEOMAP_SEMANTIC_LOCAL_FILES_ONLY", "true")
+    monkeypatch.setenv("GEOMAP_EARTHQUAKE_SOURCE_IDS", "usgs_fdsn_events,emsc_fdsn_events")
+    monkeypatch.setenv("GEOMAP_ACTIVE_FAULT_SOURCE_IDS", "gem_global_active_faults,diss_seismogenic_sources")
+    monkeypatch.setenv(
+        "GEOMAP_MINERAL_OCCURRENCE_SOURCE_IDS",
+        "ontario_mineral_deposit_inventory,sigeom_mineral_occurrences",
+    )
 
     config = KnowledgeConfig.from_env(base_dir=tmp_path)
 
@@ -75,6 +81,15 @@ def test_config_from_env_resolves_knowledge_paths(tmp_path, monkeypatch):
     assert config.semantic_min_score == 0.25
     assert config.semantic_local_files_only is True
     assert config.cache_namespace_root == config.cache_root / "knowledge" / "v2"
+    assert config.earthquake_source_ids == ("usgs_fdsn_events", "emsc_fdsn_events")
+    assert config.active_fault_source_ids == (
+        "gem_global_active_faults",
+        "diss_seismogenic_sources",
+    )
+    assert config.mineral_occurrence_source_ids == (
+        "ontario_mineral_deposit_inventory",
+        "sigeom_mineral_occurrences",
+    )
 
 
 def test_service_queries_fixture_providers_enriches_legend_and_writes_cache(tmp_path):
@@ -263,6 +278,12 @@ def test_from_env_is_cheap_and_baseline_imports_stay_light(tmp_path, monkeypatch
         sys.modules.pop(module_name, None)
 
     monkeypatch.setenv("GEOMAP_KNOWLEDGE_ROOT", str(tmp_path / "does-not-exist"))
+    monkeypatch.setenv("GEOMAP_EARTHQUAKE_SOURCE_IDS", "usgs_fdsn_events,emsc_fdsn_events")
+    monkeypatch.setenv("GEOMAP_ACTIVE_FAULT_SOURCE_IDS", "gem_global_active_faults,diss_seismogenic_sources")
+    monkeypatch.setenv(
+        "GEOMAP_MINERAL_OCCURRENCE_SOURCE_IDS",
+        "ontario_mineral_deposit_inventory,sigeom_mineral_occurrences",
+    )
     service = KnowledgeService.from_env(base_dir=tmp_path)
 
     assert service.config.knowledge_root == tmp_path / "does-not-exist"

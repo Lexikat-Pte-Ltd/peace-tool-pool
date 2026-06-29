@@ -108,6 +108,19 @@ def test_georeference_pixel_to_lonlat_roundtrip_at_gcp():
     assert lat == pytest.approx(exp_lat, abs=1e-6)
 
 
-def test_georeference_requires_at_least_two_gcps():
-    with pytest.raises(AffineFitError):
-        georeference_bounds(crs=26915, gcps=[_gcp(0, 0, 1, 1)], pixel_extent=(0, 0, 1, 1))
+def test_affine_solve_inverts_apply():
+    affine = fit_affine([_gcp(10, 20, 660000, 5400000), _gcp(1010, 1020, 690000, 5360000)])
+    wx, wy = affine.apply(123.0, 456.0)
+    px, py = affine.solve(wx, wy)
+    assert px == pytest.approx(123.0, abs=1e-6)
+    assert py == pytest.approx(456.0, abs=1e-6)
+
+
+def test_georeference_lonlat_to_pixel_roundtrips_pixel_to_lonlat():
+    gcps = [_gcp(167, 99, 660000, 5400000), _gcp(1175, 1238, 690000, 5360000)]
+    ref = georeference_bounds(crs=26915, gcps=gcps, pixel_extent=(23, 20, 1332, 1344))
+    # Round-trip a pixel out through lon/lat and back; must return the same pixel.
+    lon, lat = ref.pixel_to_lonlat(800.0, 600.0)
+    px, py = ref.lonlat_to_pixel(lon, lat)
+    assert px == pytest.approx(800.0, abs=1e-3)
+    assert py == pytest.approx(600.0, abs=1e-3)

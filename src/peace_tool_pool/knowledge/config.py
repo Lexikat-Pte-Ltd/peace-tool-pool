@@ -41,6 +41,12 @@ def _bool_value(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _source_ids_value(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None or value.strip() == "":
+        return default
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
 @dataclass
 class KnowledgeConfig:
     data_root: Path
@@ -57,8 +63,17 @@ class KnowledgeConfig:
     k2_expertise_path: Path | None = None
     earthengine_project: str | None = None
     earthquake_source_id: str = "usgs_fdsn_events"
+    earthquake_source_ids: tuple[str, ...] = ("usgs_fdsn_events", "emsc_fdsn_events")
     active_fault_source_id: str = "gem_global_active_faults"
+    active_fault_source_ids: tuple[str, ...] = (
+        "gem_global_active_faults",
+        "diss_seismogenic_sources",
+    )
     mineral_occurrence_source_id: str = "ontario_mineral_deposit_inventory"
+    mineral_occurrence_source_ids: tuple[str, ...] = (
+        "ontario_mineral_deposit_inventory",
+        "sigeom_mineral_occurrences",
+    )
     gem_active_fault_version: str | None = None
     earthquake_engine: str = "auto"
     fault_geometry_engine: str = "auto"
@@ -80,6 +95,13 @@ class KnowledgeConfig:
     @classmethod
     def from_env(cls, base_dir: str | Path | None = None) -> "KnowledgeConfig":
         root = Path(base_dir).resolve() if base_dir is not None else Path.cwd().resolve()
+        earthquake_source_id = os.getenv("GEOMAP_EARTHQUAKE_SOURCE_ID", "usgs_fdsn_events")
+        active_fault_source_id = os.getenv(
+            "GEOMAP_ACTIVE_FAULT_SOURCE_ID", "gem_global_active_faults"
+        )
+        mineral_source_id = os.getenv(
+            "GEOMAP_MINERAL_OCCURRENCE_SOURCE_ID", "ontario_mineral_deposit_inventory"
+        )
         return cls(
             data_root=_resolve_path(os.getenv("GEOMAP_DATA_ROOT", "./data"), root),
             knowledge_root=_resolve_path(
@@ -97,12 +119,26 @@ class KnowledgeConfig:
             k2_usage_path=_optional_path(os.getenv("GEOMAP_K2_USAGE_JSON"), root),
             k2_expertise_path=_optional_path(os.getenv("GEOMAP_K2_EXPERTISE_JSON"), root),
             earthengine_project=os.getenv("GEOMAP_EARTHENGINE_PROJECT") or None,
-            earthquake_source_id=os.getenv("GEOMAP_EARTHQUAKE_SOURCE_ID", "usgs_fdsn_events"),
-            active_fault_source_id=os.getenv(
-                "GEOMAP_ACTIVE_FAULT_SOURCE_ID", "gem_global_active_faults"
+            earthquake_source_id=earthquake_source_id,
+            earthquake_source_ids=_source_ids_value(
+                os.getenv("GEOMAP_EARTHQUAKE_SOURCE_IDS"),
+                (earthquake_source_id, "emsc_fdsn_events")
+                if earthquake_source_id == "usgs_fdsn_events"
+                else (earthquake_source_id,),
             ),
-            mineral_occurrence_source_id=os.getenv(
-                "GEOMAP_MINERAL_OCCURRENCE_SOURCE_ID", "ontario_mineral_deposit_inventory"
+            active_fault_source_id=active_fault_source_id,
+            active_fault_source_ids=_source_ids_value(
+                os.getenv("GEOMAP_ACTIVE_FAULT_SOURCE_IDS"),
+                (active_fault_source_id, "diss_seismogenic_sources")
+                if active_fault_source_id == "gem_global_active_faults"
+                else (active_fault_source_id,),
+            ),
+            mineral_occurrence_source_id=mineral_source_id,
+            mineral_occurrence_source_ids=_source_ids_value(
+                os.getenv("GEOMAP_MINERAL_OCCURRENCE_SOURCE_IDS"),
+                (mineral_source_id, "sigeom_mineral_occurrences")
+                if mineral_source_id == "ontario_mineral_deposit_inventory"
+                else (mineral_source_id,),
             ),
             gem_active_fault_version=os.getenv("GEOMAP_GEM_ACTIVE_FAULT_VERSION") or None,
             earthquake_engine=os.getenv("GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE", "auto"),

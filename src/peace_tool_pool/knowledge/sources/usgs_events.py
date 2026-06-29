@@ -13,10 +13,16 @@ from ..cache import write_json_atomic
 from ..errors import OptionalDependencyError, SourceQueryError, SourceSyncError
 from ..providers.base import file_sha256_digest
 from .manifest import SourceManifest
-from .registry import USGS_DEFAULT_PROFILE, _validate_usgs_profile
+from .registry import (
+    EMSC_DEFAULT_PROFILE,
+    USGS_DEFAULT_PROFILE,
+    _validate_fdsn_event_profile,
+    _validate_usgs_profile,
+)
 
 
 USGS_EVENT_BASE_URL = "https://earthquake.usgs.gov/fdsnws/event/1"
+EMSC_EVENT_BASE_URL = "https://www.seismicportal.eu/fdsnws/event/1"
 NORMALIZER_VERSION = "1"
 EARTHQUAKE_CSV_COLUMNS = (
     "identity_key",
@@ -283,6 +289,45 @@ class UsgsFdsnEventAdapter:
         if text is not None:
             return json.loads(str(text))
         return response
+
+
+class FdsnEventSourceAdapter(UsgsFdsnEventAdapter):
+    """GeoJSON/JSON FDSN event adapter for explicit federated sources.
+
+    USGS keeps its source-specific adapter because its default mirror profile and
+    historical chunking behavior are already pinned. This adapter covers other
+    FDSN services that can return GeoJSON-like JSON, such as EMSC.
+    """
+
+    def __init__(
+        self,
+        source_id: str,
+        base_url: str,
+        default_profile: Mapping[str, Any] | None = None,
+        client: Any | None = None,
+        timeout: float = 15.0,
+    ):
+        super().__init__(client=client, base_url=base_url, timeout=timeout)
+        self.source_id = source_id
+        self.default_profile = dict(default_profile or EMSC_DEFAULT_PROFILE)
+
+    def validate_profile(self, profile: Mapping[str, Any] | None) -> dict[str, Any]:
+        return _validate_fdsn_event_profile(
+            {**self.default_profile, **dict(profile or {})},
+            source_name=self.source_id,
+        )
+
+    def query_geojson(
+        self,
+        profile: Mapping[str, Any] | None,
+        bounds: Bounds | None = None,
+    ) -> dict[str, Any]:
+        params = self.query_params(profile, bounds=bounds)
+        params["format"] = str(params.get("format") or self.default_profile.get("format") or "json")
+        data = self._response_json(self._get("query", params))
+        if not isinstance(data, dict):
+            raise SourceQueryError(f"{self.source_id} query response was not a GeoJSON object.")
+        return data
 
 
 def normalize_geojson_events(data: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -115,6 +115,113 @@ def _blend_rectangle(cv2: Any, image: Any, bbox: BBox, color: Sequence[int], alp
     cv2.addWeighted(fill, alpha, roi, 1 - alpha, 0, dst=roi)
 
 
+def annotate_points_on_image(
+    image: Any,
+    markers: Sequence[tuple[float, float, Sequence[int]]],
+    output_path: str | Path,
+    *,
+    boxes: Sequence[tuple[BBox, Sequence[int]]] = (),
+    legend: Sequence[tuple[str, Sequence[int]]] = (),
+    title: str | None = None,
+) -> None:
+    """Annotate a map raster with geodata results already projected to PIXEL space.
+
+    The companion to :func:`annotate_detections_on_image` for knowledge lookups:
+    ``markers`` are ``(x, y, rgb)`` points drawn as ringed dots, ``boxes`` are
+    ``(bbox, rgb)`` areas, ``legend`` is ``(text, rgb)`` rows drawn in a corner
+    panel. Markers/boxes outside the image are skipped (never raise), mirroring the
+    overlay bounds-guard. Styling (palette, auto-scaled sizes, RGB->BGR, blended
+    legend panel) matches the detection overlay for visual consistency.
+    """
+    if isinstance(image, (str, Path)):
+        image = read_image(image)
+    cv2 = require_cv2()
+    height, width = image.shape[:2]
+    annotated = image.copy()
+    thickness = max(2, round(min(width, height) / 500))
+    radius = max(4, round(min(width, height) / 280))
+    font_scale = max(0.45, min(width, height) / 1400)
+    font_thickness = max(1, thickness - 1)
+
+    for bbox, rgb in boxes:
+        clipped = _safe_clip_bbox(bbox, width, height)
+        if clipped is None:
+            continue
+        x0, y0, x1, y1 = clipped
+        cv2.rectangle(
+            annotated, (x0, y0), (x1, y1), _rgb_to_bgr(rgb),
+            thickness=thickness, lineType=cv2.LINE_AA,
+        )
+
+    ring = radius + max(1, thickness // 2)
+    for x, y, rgb in markers:
+        cx, cy = int(round(x)), int(round(y))
+        if not (0 <= cx < width and 0 <= cy < height):
+            continue
+        cv2.circle(annotated, (cx, cy), ring, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(annotated, (cx, cy), radius, _rgb_to_bgr(rgb), thickness=-1, lineType=cv2.LINE_AA)
+
+    if title:
+        _draw_overlay_title(cv2, annotated, title, font_scale, font_thickness)
+    if legend:
+        _draw_corner_legend(cv2, annotated, list(legend), width, height, font_scale, font_thickness)
+
+    save_image(output_path, annotated)
+
+
+def _draw_overlay_title(
+    cv2: Any, image: Any, title: str, font_scale: float, font_thickness: int
+) -> None:
+    scale = font_scale * 1.1
+    thickness = font_thickness + 1
+    (text_w, text_h), baseline = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    pad = max(6, text_h // 3)
+    _blend_rectangle(cv2, image, (0, 0, text_w + 2 * pad, text_h + baseline + 2 * pad), (15, 23, 42), 0.55)
+    cv2.putText(
+        image, title, (pad, text_h + pad), cv2.FONT_HERSHEY_SIMPLEX, scale,
+        (255, 255, 255), thickness, lineType=cv2.LINE_AA,
+    )
+
+
+def _draw_corner_legend(
+    cv2: Any,
+    image: Any,
+    rows: Sequence[tuple[str, Sequence[int]]],
+    width: int,
+    height: int,
+    font_scale: float,
+    font_thickness: int,
+) -> None:
+    if not rows:
+        return
+    pad = max(6, round(min(width, height) / 160))
+    chip = max(10, round(min(width, height) / 90))
+    line_h = chip + pad
+    text_widths = [
+        cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0][0]
+        for text, _ in rows
+    ]
+    panel_w = chip + 3 * pad + (max(text_widths) if text_widths else 0)
+    panel_h = pad + len(rows) * line_h
+    x1 = width - pad
+    x0 = max(0, x1 - panel_w)
+    y0 = pad
+    y1 = min(height, y0 + panel_h)
+    _blend_rectangle(cv2, image, (x0, y0, x1, y1), (248, 250, 252), 0.82)
+    cv2.rectangle(image, (x0, y0), (x1, y1), (71, 85, 105), thickness=1, lineType=cv2.LINE_AA)
+    cy = y0 + pad
+    for text, rgb in rows:
+        chip_x0 = x0 + pad
+        cv2.rectangle(image, (chip_x0, cy), (chip_x0 + chip, cy + chip), _rgb_to_bgr(rgb), thickness=-1)
+        cv2.rectangle(image, (chip_x0, cy), (chip_x0 + chip, cy + chip), (15, 23, 42), thickness=1)
+        text_y = cy + chip - max(1, round(chip * 0.22))
+        cv2.putText(
+            image, text, (chip_x0 + chip + pad, text_y), cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale, (15, 23, 42), font_thickness, lineType=cv2.LINE_AA,
+        )
+        cy += line_h
+
+
 def annotate_detections_on_image(
     image: Any,
     detections_by_label: Mapping[str, Sequence[Any]],

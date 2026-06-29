@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import html
+import io
 import math
 import warnings as _warnings
 from dataclasses import dataclass, field
@@ -216,7 +218,17 @@ def render_knowledge_overlay_svg(
             "bounds were hidden (possible CRS misalignment)."
         )
         lines.append(f'<text x="24" y="72" class="warning">{_escape(note)}</text>')
-    lines.extend(_grid_svg(bounds, project))
+
+    # Draw the georeferenced input map as the plot background when available, so
+    # annotations sit over the real map instead of a blank panel. The image is
+    # cropped to the georef pixel_extent (the main-map area) and stretched to the
+    # plot box, which the frame bounds describe; without an image we keep the plain
+    # white panel. A faint scrim keeps coloured annotations legible over dark map ink.
+    image_svg = _plot_image_svg(overlay, project)
+    if image_svg:
+        lines.append(image_svg)
+        lines.append(_plot_scrim_svg(project))
+    lines.extend(_grid_svg(bounds, project, fill_panel=not image_svg))
 
     for item in overlay.items:
         if item.kind in {"query_bounds", "provider_bounds", "result_bbox"} and item.bounds:
@@ -227,6 +239,55 @@ def render_knowledge_overlay_svg(
     lines.append("</svg>")
     target.write_text("\n".join(lines), encoding="utf-8")
     return target
+
+
+def render_knowledge_overlay_on_image(
+    overlay: KnowledgeOverlay,
+    georef: Any,
+    image_path: str | Path,
+    output_path: str | Path,
+    *,
+    title: str | None = None,
+) -> Path:
+    """Annotate the input map raster with the queried knowledge, in pixel space.
+
+    The counterpart to :func:`render_knowledge_overlay_svg`: instead of plotting on
+    a synthetic geographic canvas, each result point/bbox is projected back onto the
+    original image via ``georef.lonlat_to_pixel`` and drawn over it (markers, boxes,
+    a provider legend) -- so the lookup can be reviewed against the actual map.
+
+    ``georef`` is duck-typed: any object exposing
+    ``lonlat_to_pixel(lon, lat) -> (pixel_x, pixel_y)`` (e.g. a
+    ``peace_tool_pool.georef.GeoReference``). Markers that land outside the image
+    are skipped by the drawing primitive, mirroring the overlay bounds-guard. The
+    cv2 drawing toolkit is imported lazily so importing this module stays light.
+    """
+    from ..map_processing.image_ops import annotate_points_on_image
+
+    markers: list[tuple[float, float, Sequence[int]]] = []
+    boxes: list[tuple[tuple[int, int, int, int], Sequence[int]]] = []
+    plotted_by_provider: dict[str | None, int] = {}
+
+    for item in overlay.items:
+        if item.kind == "result_point" and item.lon is not None and item.lat is not None:
+            pixel_x, pixel_y = georef.lonlat_to_pixel(item.lon, item.lat)
+            markers.append((pixel_x, pixel_y, item.color_rgb))
+            plotted_by_provider[item.provider] = plotted_by_provider.get(item.provider, 0) + 1
+        elif item.kind == "result_bbox" and item.bounds is not None:
+            box = item.bounds
+            x0, y0 = georef.lonlat_to_pixel(box.min_lon, box.max_lat)
+            x1, y1 = georef.lonlat_to_pixel(box.max_lon, box.min_lat)
+            boxes.append(((round(x0), round(y0), round(x1), round(y1)), item.color_rgb))
+            plotted_by_provider[item.provider] = plotted_by_provider.get(item.provider, 0) + 1
+
+    legend = [
+        (f"{provider or 'unknown'} ({count})", _color_for_provider(provider))
+        for provider, count in sorted(plotted_by_provider.items(), key=lambda kv: kv[0] or "")
+    ]
+    annotate_points_on_image(
+        image_path, markers, output_path, boxes=boxes, legend=legend, title=title
+    )
+    return Path(output_path)
 
 
 def _bounds_parts_from_trace(trace: Mapping[str, Any] | None) -> list[Bounds]:
@@ -438,6 +499,90 @@ def _out_of_bounds_warnings(
     ]
 
 
+def _plot_image_svg(overlay: KnowledgeOverlay, project: Any) -> str:
+    """SVG ``<image>`` of the input map filling the plot box, or "" when absent."""
+    frame = overlay.frame
+    if not frame.image_path:
+        return ""
+    data_uri = _load_map_image_data_uri(frame.image_path, frame.georef)
+    if data_uri is None:
+        return ""
+    x, y, width, height = project.plot_box
+    return (
+        f'<image x="{x:.2f}" y="{y:.2f}" width="{width:.2f}" height="{height:.2f}" '
+        f'href="{data_uri}" preserveAspectRatio="none"/>'
+    )
+
+
+def _plot_scrim_svg(project: Any) -> str:
+    x, y, width, height = project.plot_box
+    return (
+        f'<rect x="{x:.2f}" y="{y:.2f}" width="{width:.2f}" height="{height:.2f}" '
+        'fill="#ffffff" fill-opacity="0.12"/>'
+    )
+
+
+def _load_map_image_data_uri(
+    image_path: str,
+    georef: Mapping[str, Any] | None,
+    *,
+    max_dim: int = 1600,
+) -> str | None:
+    """Crop the input map to its georef pixel_extent and return a PNG data URI.
+
+    Returns ``None`` (so the renderer falls back to a blank panel) when Pillow is
+    unavailable or the image cannot be read -- a missing backdrop must never break
+    the overlay. Cropping to ``pixel_extent`` aligns the main-map area with the
+    frame bounds; the result is downscaled to keep the embedded SVG small.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    path = Path(image_path)
+    if not path.exists():
+        return None
+    try:
+        with Image.open(path) as opened:
+            image = opened.convert("RGB")
+            crop = _pixel_extent(georef, image.size)
+            if crop is not None:
+                image = image.crop(crop)
+            longest = max(image.size)
+            if longest > max_dim:
+                scale = max_dim / longest
+                image = image.resize(
+                    (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+                )
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+    except Exception:  # noqa: BLE001 - a malformed image degrades to no backdrop.
+        return None
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _pixel_extent(
+    georef: Mapping[str, Any] | None,
+    image_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(georef, Mapping):
+        return None
+    raw = georef.get("pixel_extent")
+    if not (_is_sequence(raw) and len(raw) >= 4):
+        return None
+    try:
+        x0, y0, x1, y1 = (int(round(float(value))) for value in raw[:4])
+    except (TypeError, ValueError):
+        return None
+    width, height = image_size
+    x0, x1 = sorted((max(0, x0), min(width, x1)))
+    y0, y1 = sorted((max(0, y0), min(height, y1)))
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return (x0, y0, x1, y1)
+
+
 def _metadata_image_path(metadata: Mapping[str, Any] | None) -> str | None:
     if not isinstance(metadata, Mapping):
         return None
@@ -499,11 +644,12 @@ def _projector(bounds: Bounds, width: int, height: int):
     return project
 
 
-def _grid_svg(bounds: Bounds, project: Any) -> list[str]:
+def _grid_svg(bounds: Bounds, project: Any, *, fill_panel: bool = True) -> list[str]:
     x, y, width, height = project.plot_box
+    panel_fill = "#ffffff" if fill_panel else "none"
     lines = [
         f'<rect x="{x:.2f}" y="{y:.2f}" width="{width:.2f}" height="{height:.2f}" '
-        'fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>'
+        f'fill="{panel_fill}" stroke="#cbd5e1" stroke-width="1"/>'
     ]
     for lon in _ticks(bounds.min_lon, bounds.max_lon, 4):
         x0, y0 = project(lon, bounds.min_lat)
@@ -583,6 +729,7 @@ __all__ = [
     "KnowledgeOverlay",
     "KnowledgeOverlayFrame",
     "KnowledgeOverlayItem",
+    "render_knowledge_overlay_on_image",
     "extract_knowledge_overlay",
     "render_knowledge_overlay_svg",
 ]

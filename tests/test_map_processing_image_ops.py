@@ -112,6 +112,45 @@ def test_legend_inline_tag_scales_to_box_height_and_blends_background(tmp_path):
     assert not np.any(np.all(tag_region.reshape(-1, 3) == (252, 250, 248), axis=1))
 
 
+def test_annotate_points_draws_markers_boxes_and_legend(tmp_path):
+    image = np.full((200, 300, 3), 255, dtype=np.uint8)
+    output_path = tmp_path / "knowledge_points.png"
+
+    image_ops.annotate_points_on_image(
+        image,
+        [(150.0, 100.0, (22, 163, 74))],  # green mineral-occurrence marker
+        output_path,
+        boxes=[((40, 40, 90, 90), (220, 38, 38))],  # red fault box
+        legend=[("mineral_occurrences (1)", (22, 163, 74))],
+        title="knowledge overlay",
+    )
+
+    overlay = cv2.imread(str(output_path))
+    assert overlay is not None
+    assert overlay.shape == image.shape
+    # the marker centre is no longer white
+    assert not np.array_equal(overlay[100, 150], (255, 255, 255))
+    # a pixel of the provider colour (RGB 22,163,74 -> BGR 74,163,22) is present at the marker
+    near_marker = overlay[90:111, 140:161].reshape(-1, 3)
+    assert np.any(np.all(near_marker == (74, 163, 22), axis=1))
+
+
+def test_annotate_points_skips_out_of_bounds_markers(tmp_path):
+    image = np.full((50, 50, 3), 255, dtype=np.uint8)
+    output_path = tmp_path / "oob.png"
+
+    # Markers off the image are skipped (the bounds-guard philosophy) and never raise.
+    image_ops.annotate_points_on_image(
+        image,
+        [(999.0, 999.0, (22, 163, 74)), (-5.0, 10.0, (1, 2, 3))],
+        output_path,
+    )
+
+    overlay = cv2.imread(str(output_path))
+    assert overlay is not None
+    assert np.array_equal(overlay, image)
+
+
 def test_annotate_detections_skips_invalid_legend_bboxes(tmp_path):
     image = np.full((60, 60, 3), 255, dtype=np.uint8)
     output_path = tmp_path / "invalid_legend_overlay.png"

@@ -46,6 +46,7 @@ The default environment stays lightweight. Install extras only for the tool fami
 | `uv sync`                                | Package scaffold only.                        |
 | `uv sync --extra detectors`              | Component and legend detection work.          |
 | `uv sync --extra knowledge-local`        | Optimized local geological knowledge queries. |
+| `uv sync --extra knowledge-network`      | Explicit knowledge source sync/live HTTP.     |
 | `uv sync --extra knowledge-earthengine`  | Live Earth Engine geographic providers.       |
 | `uv sync --extra knowledge-semantic`     | Semantic K2 retrieval with embedding models.  |
 | `uv sync --extra mcp`                    | Future MCP server surface.                    |
@@ -136,8 +137,23 @@ bundle = service.query_bounds(
 legend = service.enrich_legend_label("sandstone")
 ```
 
-Provider outputs are written under `${GEOMAP_CACHE_ROOT:-.cache}/knowledge/v1/`
+Provider outputs are written under `${GEOMAP_CACHE_ROOT:-.cache}/knowledge/v2/`
 when caching is enabled.
+
+Earthquake and active-fault providers first look for normalized source mirrors under
+`${GEOMAP_KNOWLEDGE_SOURCES_ROOT:-data/knowledge/sources}`. If no mirror is present,
+they fall back to PEACE's legacy local assets under `dependencies/knowledge/` and add
+a warning to the returned bundle. Live network behavior is never enabled by default;
+it requires per-request `provider_options={"earthquake_history": {"source_mode": "live"}}`.
+
+Sync source mirrors explicitly after installing the network extra:
+
+```bash
+uv run --extra knowledge-network python -m peace_tool_pool.knowledge.sources.sync usgs_fdsn_events \
+  --profile-json docs/source-manifests/usgs_fdsn_events/default.json
+uv run --extra knowledge-network python -m peace_tool_pool.knowledge.sources.sync gem_global_active_faults \
+  --profile-json docs/source-manifests/gem_global_active_faults/default.json
+```
 
 The `knowledge-local` extra enables faster local engines where available:
 
@@ -171,6 +187,10 @@ Use `.env.example` as the starting point for local configuration. Do not commit 
 | `GEOMAP_DATA_ROOT`  | Local data or sample maps.                                             |
 | `GEOMAP_MODEL_ROOT` | Detector model root.                                                   |
 | `GEOMAP_KNOWLEDGE_ROOT` | Local geological knowledge asset root.                            |
+| `GEOMAP_KNOWLEDGE_SOURCES_ROOT` | Normalized source mirror root.                         |
+| `GEOMAP_EARTHQUAKE_SOURCE_ID` | Earthquake source id, defaults to `usgs_fdsn_events`.      |
+| `GEOMAP_ACTIVE_FAULT_SOURCE_ID` | Active-fault source id, defaults to `gem_global_active_faults`. |
+| `GEOMAP_GEM_ACTIVE_FAULT_VERSION` | Optional pinned local GEM mirror version.              |
 | `GEOMAP_CACHE_ROOT` | Cache root for detector outputs and derived artifacts.                 |
 | `GEOMAP_KNOWLEDGE_EARTHQUAKE_ENGINE` | `auto`, `csv`, or `pandas`.                    |
 | `GEOMAP_KNOWLEDGE_FAULT_GEOMETRY_ENGINE` | `auto`, `bbox`, or `shapely`.             |

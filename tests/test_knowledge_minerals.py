@@ -13,11 +13,15 @@ import pytest
 
 from peace_tool_pool.knowledge import Bounds, KnowledgeRequest, KnowledgeService
 from peace_tool_pool.knowledge.errors import OptionalDependencyError, ProviderOptionError
-from peace_tool_pool.knowledge.providers.minerals import MineralOccurrenceProvider
+from peace_tool_pool.knowledge.providers.minerals import MineralOccurrenceProvider, MineralSourceBinding
 from peace_tool_pool.knowledge.sources import ogs_minerals
 from peace_tool_pool.knowledge.sources.ogs_minerals import (
     OgsMineralOccurrenceAdapter,
     normalize_features,
+)
+from peace_tool_pool.knowledge.sources.sigeom_minerals import (
+    SigeomMineralOccurrenceAdapter,
+    normalize_sigeom_features,
 )
 
 
@@ -55,6 +59,8 @@ SHEBANDOWAN = Bounds(min_lon=-90.90, min_lat=48.33, max_lon=-90.35, max_lat=48.7
 # rectangular bbox (Ontario reaches -74.3 at its SE tip) -- separating adjacent
 # provinces needs the deferred Approach-C authority-polygon routing, not a bbox.
 CALIFORNIA = Bounds(min_lon=-122.5, min_lat=37.0, max_lon=-121.5, max_lat=38.0)
+QUEBEC_JAMES_BAY = Bounds(min_lon=-77.0, min_lat=52.0, max_lon=-75.0, max_lat=53.0)
+QUEBEC = Bounds(min_lon=-79.8, min_lat=44.8, max_lon=-57.1, max_lat=62.7)
 
 
 class FakeResponse:
@@ -142,6 +148,54 @@ def test_provider_skips_network_outside_coverage_region_and_warns():
     assert item.record_count == 0
     assert fake.calls == []  # no network call for an out-of-region query
     assert any("ontario" in w.lower() for w in provider.last_warnings)
+
+
+def test_provider_queries_multiple_regional_sources_and_returns_quebec_occurrences():
+    ontario_client = FakeClient({"type": "FeatureCollection", "features": []})
+    sigeom_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "NOM": "Lac Test Lithium",
+                    "SUBSTANCE": "Lithium",
+                    "STATUT": "Indice",
+                },
+                "geometry": {"type": "Point", "coordinates": [-76.0, 52.5]},
+            }
+        ],
+    }
+    sigeom_client = FakeClient(sigeom_payload)
+    provider = MineralOccurrenceProvider(
+        source_bindings=[
+            MineralSourceBinding(
+                source_id="ontario_mineral_deposit_inventory",
+                adapter=OgsMineralOccurrenceAdapter(client=ontario_client),
+                normalize=normalize_features,
+                coverage_bounds=ONTARIO,
+                region_name="Ontario",
+            ),
+            MineralSourceBinding(
+                source_id="sigeom_mineral_occurrences",
+                adapter=SigeomMineralOccurrenceAdapter(client=sigeom_client),
+                normalize=normalize_sigeom_features,
+                coverage_bounds=QUEBEC,
+                region_name="Quebec",
+            ),
+        ]
+    )
+
+    item = provider.query(KnowledgeRequest(bounds=QUEBEC_JAMES_BAY))[0]
+
+    assert item.record_count == 1
+    assert item.value[0]["primary_commodity"] == "Lithium"
+    assert ontario_client.calls  # The rectangular overlap remains visible.
+    assert sigeom_client.calls
+    assert item.provenance["source_ids"] == [
+        "ontario_mineral_deposit_inventory",
+        "sigeom_mineral_occurrences",
+    ]
 
 
 def test_provider_zero_result_in_region_warns_absence_is_not_evidence():

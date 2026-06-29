@@ -6,6 +6,7 @@ from peace_tool_pool.knowledge import Bounds, KnowledgeBundle, KnowledgeItem
 from peace_tool_pool.knowledge.visualization import (
     KNOWLEDGE_OVERLAY_COLORS_RGB,
     extract_knowledge_overlay,
+    render_knowledge_overlay_on_image,
     render_knowledge_overlay_svg,
 )
 
@@ -276,6 +277,82 @@ def test_render_overlay_notes_hidden_out_of_bounds(tmp_path: Path) -> None:
     assert "Strayed" not in text
     assert "Far Fault" not in text
     assert "outside the target map bounds" in text
+
+
+class _FakeGeoref:
+    """Linear lon/lat -> pixel map over the _bundle() frame into a 200x160 image."""
+
+    def lonlat_to_pixel(self, lon: float, lat: float) -> tuple[float, float]:
+        x = (lon + 122.5) / 32.2 * 200
+        y = (48.8 - lat) / 11.8 * 160
+        return x, y
+
+
+def test_render_overlay_on_image_projects_and_annotates(tmp_path: Path) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    pytest.importorskip("cv2")
+    import cv2
+
+    source = tmp_path / "map.png"
+    Image.new("RGB", (200, 160), (255, 255, 255)).save(source)
+
+    overlay = extract_knowledge_overlay(_bundle())
+    output_path = tmp_path / "annotated.png"
+    result = render_knowledge_overlay_on_image(
+        overlay, _FakeGeoref(), source, output_path, title="knowledge on map"
+    )
+
+    assert result == output_path and output_path.exists()
+    annotated = cv2.imread(str(output_path))
+    assert annotated.shape == (160, 200, 3)  # input raster preserved
+    assert not (annotated == 255).all()  # knowledge results were drawn onto the map
+
+
+def test_render_overlay_embeds_map_image_background(tmp_path: Path) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    png = tmp_path / "map.png"
+    Image.new("RGB", (40, 30), (200, 180, 160)).save(png)
+    # The georef pixel_extent is the main-map crop the renderer should align to.
+    metadata = {
+        "image_path": str(png),
+        "georef": {"crs": "EPSG:4326", "pixel_extent": [4, 3, 36, 27]},
+    }
+
+    overlay = extract_knowledge_overlay(_bundle(), metadata=metadata)
+    assert overlay.frame.image_path == str(png)
+
+    output_path = tmp_path / "map_backed.svg"
+    render_knowledge_overlay_svg(overlay, output_path, title="Map backed overlay")
+    text = output_path.read_text(encoding="utf-8")
+
+    assert "<image " in text  # the input map is embedded as the plot background
+    assert "data:image/png;base64," in text  # self-contained (no external file ref)
+    assert "Alpha Fault" in text  # annotations are still drawn on top of the map
+
+
+def test_render_overlay_without_image_keeps_white_panel(tmp_path: Path) -> None:
+    overlay = extract_knowledge_overlay(_bundle())  # no metadata -> no image
+    output_path = tmp_path / "no_image.svg"
+
+    render_knowledge_overlay_svg(overlay, output_path)
+    text = output_path.read_text(encoding="utf-8")
+
+    assert "<image " not in text
+    assert 'fill="#ffffff"' in text  # falls back to the plain white plot panel
+
+
+def test_render_overlay_missing_image_file_is_graceful(tmp_path: Path) -> None:
+    metadata = {
+        "image_path": str(tmp_path / "does_not_exist.png"),
+        "georef": {"pixel_extent": [0, 0, 10, 10]},
+    }
+    overlay = extract_knowledge_overlay(_bundle(), metadata=metadata)
+    output_path = tmp_path / "broken_image.svg"
+
+    # A missing/unreadable image must never break the overlay -- it degrades to no image.
+    render_knowledge_overlay_svg(overlay, output_path)
+    text = output_path.read_text(encoding="utf-8")
+    assert "<image " not in text
 
 
 def test_render_overlay_svg_writes_visual_artifact(tmp_path: Path) -> None:

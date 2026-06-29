@@ -62,6 +62,17 @@ class AffineTransform:
         wy = self.d * pixel_x + self.e * pixel_y + self.f
         return wx, wy
 
+    def solve(self, world_x: float, world_y: float) -> tuple[float, float]:
+        """Inverse of :meth:`apply`: map a world coordinate back to a pixel."""
+        det = self.a * self.e - self.b * self.d
+        if det == 0:
+            raise AffineFitError("Affine transform is singular and cannot be inverted.")
+        wx = world_x - self.c
+        wy = world_y - self.f
+        pixel_x = (self.e * wx - self.b * wy) / det
+        pixel_y = (-self.d * wx + self.a * wy) / det
+        return pixel_x, pixel_y
+
     @property
     def coefficients(self) -> tuple[float, float, float, float, float, float]:
         return (self.a, self.b, self.c, self.d, self.e, self.f)
@@ -83,6 +94,14 @@ class GeoReference:
         wx, wy = self.affine.apply(pixel_x, pixel_y)
         lon, lat = transformer.transform(wx, wy)
         return float(lon), float(lat)
+
+    def lonlat_to_pixel(self, lon: float, lat: float) -> tuple[float, float]:
+        """Map (lon, lat) in EPSG:4326 to a pixel coordinate (inverse of
+        :meth:`pixel_to_lonlat`): reproject lon/lat into the map CRS, then invert
+        the pixel->world affine."""
+        transformer = _build_transformer(self.crs, inverse=True)
+        world_x, world_y = transformer.transform(lon, lat)
+        return self.affine.solve(float(world_x), float(world_y))
 
 
 def _fit_axis_aligned(p0: GroundControlPoint, p1: GroundControlPoint) -> AffineTransform:
@@ -130,11 +149,13 @@ def fit_affine(gcps: Sequence[GroundControlPoint]) -> AffineTransform:
     return AffineTransform(a=a, b=b, c=c, d=d, e=e, f=f, residual=rms)
 
 
-def _build_transformer(epsg: str):
+def _build_transformer(epsg: str, *, inverse: bool = False):
     if _pyproj is None:
         raise GeoReferenceError(
             "pyproj is required for reprojection; install the 'geo' extra."
         ) from _PYPROJ_IMPORT_ERROR
+    if inverse:
+        return _pyproj.Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
     return _pyproj.Transformer.from_crs(epsg, "EPSG:4326", always_xy=True)
 
 

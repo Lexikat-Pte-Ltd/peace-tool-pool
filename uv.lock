@@ -1341,6 +1341,7 @@ knowledge-semantic = [
 ]
 mcp = [
     { name = "mcp" },
+    { name = "pillow" },
 ]
 
 [package.dev-dependencies]
@@ -1355,13 +1356,14 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'knowledge-network'", specifier = ">=0.27,<1" },
     { name = "huggingface-hub", marker = "extra == 'detectors'", specifier = ">=0.24,<1" },
     { name = "matplotlib", marker = "extra == 'detectors'", specifier = "==3.9.2" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0,<2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12,<2" },
     { name = "numpy", marker = "extra == 'detectors'", specifier = "==1.26.4" },
     { name = "numpy", marker = "extra == 'geo'", specifier = "==1.26.4" },
     { name = "opencv-python", marker = "extra == 'detectors'", specifier = "==4.10.0.84" },
     { name = "pandas", marker = "extra == 'detectors'", specifier = "==2.2.2" },
     { name = "pandas", marker = "extra == 'knowledge-local'", specifier = "==2.2.2" },
     { name = "pillow", marker = "extra == 'detectors'", specifier = "==11.0.0" },
+    { name = "pillow", marker = "extra == 'mcp'", specifier = "==11.0.0" },
     { name = "psutil", marker = "extra == 'detectors'", specifier = "==6.0.0" },
     { name = "pyproj", marker = "extra == 'geo'", specifier = ">=3.4,<4" },
     { name = "pyyaml", marker = "extra == 'detectors'", specifier = ">=6,<7" },

@@ -47,8 +47,12 @@ geo = [
     "pyproj>=3.4,<4",
 ]
 mcp = [
-    "mcp>=1.0,<2",
+    "mcp>=1.12,<2",
+    "pillow==11.0.0",
 ]
+
+[project.scripts]
+peace-tool-pool-mcp = "peace_tool_pool.mcp.server:main"
 
 [dependency-groups]
 dev = [

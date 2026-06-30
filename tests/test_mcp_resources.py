@@ -89,6 +89,40 @@ def test_registry_rejects_symlink_escape(tmp_path, monkeypatch):
     assert exc_info.value.code == "disallowed_path"
 
 
+def test_deferred_save_coalesces_writes(tmp_path, monkeypatch):
+    registry, _, cache_root = _registry(tmp_path, monkeypatch)
+    paths = []
+    for index in range(3):
+        path = cache_root / f"crop_{index}.png"
+        path.write_bytes(PNG_1X1)
+        paths.append(path)
+
+    calls = {"count": 0}
+    original_write = registry._write
+
+    def counting_write():
+        calls["count"] += 1
+        original_write()
+
+    monkeypatch.setattr(registry, "_write", counting_write)
+
+    with registry.deferred_save():
+        for path in paths:
+            registry.register_artifact(path, role="component_crop", stage="hie")
+    assert calls["count"] == 1
+
+    # Each registration outside a deferred scope writes once on its own.
+    calls["count"] = 0
+    extra = cache_root / "crop_extra.png"
+    extra.write_bytes(PNG_1X1)
+    registry.register_artifact(extra, role="component_crop", stage="hie")
+    assert calls["count"] == 1
+
+    # All four artifacts survived the coalesced and direct writes.
+    reloaded = ResourceRegistry.from_env(base_dir=tmp_path)
+    assert len(reloaded._data["artifacts"]) == 4
+
+
 def test_reading_stale_artifact_returns_typed_error(tmp_path, monkeypatch):
     registry, _, cache_root = _registry(tmp_path, monkeypatch)
     artifact_path = cache_root / "overlay.png"

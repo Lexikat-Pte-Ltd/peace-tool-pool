@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
+from contextvars import ContextVar
 from typing import Any, Callable, Mapping
 
 from ..knowledge import Bounds, KnowledgeBundle, KnowledgeItem, KnowledgeRequest
@@ -26,6 +28,37 @@ from .schemas import (
 KnowledgeServiceFactory = Callable[[], KnowledgeService]
 MapServiceFactory = Callable[[], Any]
 
+# One trace id per agent-facing tool call. Nested adapter calls (e.g. query_map
+# delegating to query_knowledge) reuse the outer id so a single call has a single
+# trace, and any McpToolError raised mid-call -- including trace-agnostic registry
+# errors -- is stamped with it before it leaves the adapter.
+_ACTIVE_TRACE: ContextVar[str | None] = ContextVar("geomap_active_trace_id", default=None)
+
+
+def _active_trace_id() -> str:
+    current = _ACTIVE_TRACE.get()
+    return current if current is not None else new_trace_id()
+
+
+def _traced(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Stamp the call's trace id onto any McpToolError that lacks one."""
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        existing = _ACTIVE_TRACE.get()
+        trace_id = existing if existing is not None else new_trace_id()
+        token = _ACTIVE_TRACE.set(trace_id)
+        try:
+            return method(self, *args, **kwargs)
+        except McpToolError as exc:
+            if exc.trace_id is None:
+                exc.trace_id = trace_id
+            raise
+        finally:
+            _ACTIVE_TRACE.reset(token)
+
+    return wrapper
+
 
 class GeomapMcpAdapter:
     """Thin protocol-independent adapter over existing local SDK services."""
@@ -43,8 +76,9 @@ class GeomapMcpAdapter:
         self._knowledge_service: KnowledgeService | None = None
         self._map_service: Any | None = None
 
+    @_traced
     def list_capabilities(self) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         service = self._knowledge()
         providers = [
             {
@@ -89,8 +123,9 @@ class GeomapMcpAdapter:
             trace_id=trace_id,
         )
 
+    @_traced
     def register_map(self, path: str) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         path_string = str(path)
         if path_string.startswith("geomap://maps/"):
             structured = self.registry.map_public(self.registry.map_id_from_uri(path_string))
@@ -109,8 +144,9 @@ class GeomapMcpAdapter:
             ],
         )
 
+    @_traced
     def process_image(self, *, map_id: str | None = None, map_uri: str | None = None) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         resolved_map_id = self._resolve_map_id(map_id=map_id, map_uri=map_uri)
         image_path = self.registry.source_path(resolved_map_id)
         try:
@@ -119,17 +155,20 @@ class GeomapMcpAdapter:
             if exc.__class__.__name__ in {"OptionalDependencyError", "DetectorLoadError"}:
                 raise McpToolError("missing_extra", str(exc), trace_id=trace_id) from exc
             raise
-        structured = map_processing_result_to_mcp(
-            result,
-            registry=self.registry,
-            map_id=resolved_map_id,
-        )
-        content: list[dict[str, Any]] = []
-        preview = self._preview_for_role(structured.get("artifacts", []), "detection_overlay")
-        if preview is not None:
-            structured["preview"] = preview["metadata"]
-            content.append(preview["content"])
-        self.registry.set_map_processing(resolved_map_id, structured)
+        # One map carries many artifacts; coalesce their registrations into a
+        # single locked merge-write instead of one per artifact.
+        with self.registry.deferred_save():
+            structured = map_processing_result_to_mcp(
+                result,
+                registry=self.registry,
+                map_id=resolved_map_id,
+            )
+            content: list[dict[str, Any]] = []
+            preview = self._preview_for_role(structured.get("artifacts", []), "detection_overlay")
+            if preview is not None:
+                structured["preview"] = preview["metadata"]
+                content.append(preview["content"])
+            self.registry.set_map_processing(resolved_map_id, structured)
         resource_links = [
             {"uri": artifact["uri"], "name": artifact.get("role") or "artifact", "mimeType": artifact.get("mime_type")}
             for artifact in structured.get("artifacts", [])
@@ -146,6 +185,7 @@ class GeomapMcpAdapter:
             resource_links=resource_links,
         )
 
+    @_traced
     def georeference(
         self,
         *,
@@ -156,7 +196,7 @@ class GeomapMcpAdapter:
         map_uri: str | None = None,
         main_map_artifact_uri: str | None = None,
     ) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         resolved_map_id = self._resolve_map_id(map_id=map_id, map_uri=map_uri, required=False)
         normalized_gcps = [_gcp_dict(gcp) for gcp in gcps]
         if pixel_extent is None and main_map_artifact_uri:
@@ -206,6 +246,7 @@ class GeomapMcpAdapter:
             resource_links=resource_links,
         )
 
+    @_traced
     def query_knowledge(
         self,
         *,
@@ -219,7 +260,7 @@ class GeomapMcpAdapter:
         provider_options: Mapping[str, Mapping[str, Any]] | None = None,
         map_id: str | None = None,
     ) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         try:
             request = KnowledgeRequest(
                 bounds=_bounds_from_any(bounds),
@@ -244,6 +285,7 @@ class GeomapMcpAdapter:
             raise
         return self._bundle_result(bundle, trace_id=trace_id, map_id=map_id)
 
+    @_traced
     def query_map(
         self,
         *,
@@ -289,8 +331,9 @@ class GeomapMcpAdapter:
             map_id=resolved_map_id,
         )
 
+    @_traced
     def enrich_legend(self, label: str) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         enrichment = self._knowledge().enrich_legend_label(label)
         structured = legend_enrichment_to_mcp(enrichment)
         return success_result(
@@ -299,6 +342,7 @@ class GeomapMcpAdapter:
             trace_id=trace_id,
         )
 
+    @_traced
     def render_knowledge_overlay(
         self,
         *,
@@ -308,7 +352,7 @@ class GeomapMcpAdapter:
         bundle: Mapping[str, Any] | None = None,
         georef: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        trace_id = new_trace_id()
+        trace_id = _active_trace_id()
         resolved_map_id = self._resolve_map_id(map_id=map_id, map_uri=map_uri, required=False)
         bundle_data = self._bundle_data(bundle_uri=bundle_uri, bundle=bundle)
         georef_data = dict(georef or {})

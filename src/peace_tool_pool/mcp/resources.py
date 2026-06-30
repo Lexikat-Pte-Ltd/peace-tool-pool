@@ -104,6 +104,8 @@ class ResourceRegistry:
         self.max_source_bytes = int(max_source_bytes)
         self.max_resource_read_bytes = int(max_resource_read_bytes)
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        self._defer_depth = 0
+        self._dirty = False
         self._data = self._load()
 
     @classmethod
@@ -318,9 +320,34 @@ class ResourceRegistry:
         return data
 
     def _save(self) -> None:
+        if self._defer_depth > 0:
+            self._dirty = True
+            return
+        self._write()
+
+    def _write(self) -> None:
         with _registry_file_lock(self.registry_path):
             self._data = _merge_registry_data(self._load(), self._data)
             write_json_atomic(self.registry_path, self._data)
+
+    @contextmanager
+    def deferred_save(self):
+        """Coalesce nested registry mutations into one locked merge-write.
+
+        A multi-artifact tool call (e.g. ``process_image``) registers many
+        artifacts; without this each registration would take the file lock and
+        re-merge the whole registry. Nested scopes are reference counted so only
+        the outermost scope flushes, and only if something was actually written.
+        """
+
+        self._defer_depth += 1
+        try:
+            yield
+        finally:
+            self._defer_depth -= 1
+            if self._defer_depth == 0 and self._dirty:
+                self._dirty = False
+                self._write()
 
     def _validate_existing_file(self, path: str | Path, *, error_code: str) -> Path:
         source = Path(path).expanduser()

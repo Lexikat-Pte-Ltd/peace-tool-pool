@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import sys
+import traceback
 from typing import Any, Mapping
 
 from .adapter import GeomapMcpAdapter
 from .errors import McpToolError
-from .schemas import tool_definitions
+from .schemas import new_trace_id, tool_definitions
 
 
 def create_server(adapter: GeomapMcpAdapter | None = None) -> Any:
@@ -56,30 +57,38 @@ def create_server(adapter: GeomapMcpAdapter | None = None) -> Any:
             )
         return tools
 
+    def error_result(code: str, message: str, *, trace_id: str | None = None) -> Any:
+        # Every error envelope carries a code and a trace id (generated if the
+        # failure had none), mirroring the success-path structuredContent shape so
+        # an agent can branch on `error.code` instead of parsing prose.
+        resolved_trace = trace_id or new_trace_id()
+        err = {"code": code, "message": message, "trace_id": resolved_trace}
+        structured = {"isError": True, "error": err, **err, "text_summary": message}
+        return ServerResult(
+            CallToolResult(
+                content=[TextContent(type="text", text=message)],
+                structuredContent=structured,
+                isError=True,
+            )
+        )
+
     async def call_tool(request: Any) -> Any:
         name = request.params.name
         arguments = request.params.arguments or {}
         definition = definitions.get(name)
         if definition is None:
-            return server._make_error_result(f"Unknown geomap MCP tool: {name}")
+            return error_result("unknown_tool", f"Unknown geomap MCP tool: {name}")
         try:
             validate(instance=arguments, schema=definition["inputSchema"])
         except ValidationError as exc:
-            return server._make_error_result(f"Input validation error: {exc.message}")
+            return error_result("invalid_arguments", f"Input validation error: {exc.message}")
         try:
             result = _call_adapter(adapter, name, arguments)
         except McpToolError as exc:
-            err = exc.to_dict()
-            structured = {"isError": True, "error": err, **err, "text_summary": exc.message}
-            return ServerResult(
-                CallToolResult(
-                    content=[TextContent(type="text", text=exc.message)],
-                    structuredContent=structured,
-                    isError=True,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - match MCP SDK tool-error behavior.
-            return server._make_error_result(str(exc))
+            return error_result(exc.code, exc.message, trace_id=exc.trace_id)
+        except Exception as exc:  # noqa: BLE001 - unexpected failures must not crash the server.
+            traceback.print_exc(file=sys.stderr)
+            return error_result("internal_error", f"Unexpected {type(exc).__name__} while handling {name}.")
         content = []
         for item in result.get("content", []):
             if item.get("type") == "image":
@@ -107,7 +116,7 @@ def create_server(adapter: GeomapMcpAdapter | None = None) -> Any:
         try:
             validate(instance=structured, schema=definition["outputSchema"])
         except ValidationError as exc:
-            return server._make_error_result(f"Output validation error: {exc.message}")
+            return error_result("invalid_output", f"Output validation error: {exc.message}")
         return ServerResult(
             CallToolResult(
                 content=content,

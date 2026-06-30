@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "peace-tool-pool": {
+      "type": "local",
+      "command": ["uv", "run", "--no-sync", "peace-tool-pool-mcp"],
+      "environment": {
+        "GEOMAP_DATA_ROOT": "/home/elijah/peace-tool-pool/data",
+        "GEOMAP_CACHE_ROOT": "/home/elijah/peace-tool-pool/.cache",
+        "GEOMAP_MCP_ALLOWED_ROOTS": "/home/elijah/peace-tool-pool/data:/home/elijah/peace-tool-pool/.cache"
+      },
+      "enabled": true,
+      "timeout": 180000
+    },
+    "arxiv": { "enabled": false },
+    "playwright": { "enabled": false }
+  }
+}

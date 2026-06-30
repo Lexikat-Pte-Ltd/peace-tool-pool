@@ -426,14 +426,43 @@ class GeomapMcpAdapter:
         structured = knowledge_bundle_to_mcp(bundle)
         bundle_resource = self.registry.register_bundle(structured, map_id=map_id)
         structured["bundle_uri"] = bundle_resource["uri"]
-        provider_counts: dict[str, int] = {}
+
+        # Each item is a per-provider *summary*; the records it found live in
+        # `record_count` (found) and `value` (returned). Summarizing by item
+        # count hides the yield -- e.g. "1 item" for 86 mineral occurrences --
+        # so surface record totals plus a per-provider breakdown an agent can
+        # branch on without re-summing `item.value` itself.
+        record_counts: dict[str, int] = {}
+        returned_counts: dict[str, int] = {}
+        truncated = False
         for item in structured.get("items", []):
             provider = item.get("provider", "unknown")
-            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            returned = _returned_count(item.get("value"))
+            found = item.get("record_count")
+            found = int(found) if found is not None else returned
+            record_counts[provider] = record_counts.get(provider, 0) + found
+            returned_counts[provider] = returned_counts.get(provider, 0) + returned
+            truncated = truncated or bool(item.get("truncated")) or found > returned
+
+        total_found = sum(record_counts.values())
+        total_returned = sum(returned_counts.values())
+        structured["record_counts"] = record_counts
+        structured["total_records_found"] = total_found
+        structured["total_records_returned"] = total_returned
+        structured["truncated"] = truncated
+
         summary = (
-            f"Knowledge query returned {len(structured.get('items', []))} item(s) "
-            f"from {len(provider_counts)} provider(s)."
+            f"Knowledge query found {total_found} record(s) "
+            f"across {len(record_counts)} provider(s)"
         )
+        if total_returned < total_found:
+            summary += f" ({total_returned} returned, truncated)"
+        nonempty = {provider: count for provider, count in record_counts.items() if count}
+        if nonempty:
+            breakdown = ", ".join(f"{provider}={count}" for provider, count in nonempty.items())
+            summary += f": {breakdown}."
+        else:
+            summary += "; no provider returned records."
         if structured.get("warnings"):
             summary += f" {len(structured['warnings'])} warning(s)."
         return success_result(
@@ -520,6 +549,18 @@ class GeomapMcpAdapter:
 
 def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+def _returned_count(value: Any) -> int:
+    """How many records a knowledge item actually carries in its ``value``."""
+
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, dict):
+        return 1 if value else 0
+    return 1
 
 
 def _bounds_from_any(value: Mapping[str, Any] | Bounds | None) -> Bounds | None:

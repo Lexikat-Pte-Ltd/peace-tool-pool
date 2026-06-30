@@ -282,6 +282,29 @@ explicit-only. Request them with `include=("mineral_occurrences",)`,
 `include=("rock_knowledge", "component_usage_knowledge", "downstream_task_knowledge")`
 after installing the matching extra and configuring credentials/assets.
 
+### Bundle Warnings
+
+Knowledge bundles carry a non-fatal `warnings` list. An empty result paired with
+a warning means a source did not cover the query, not that nothing exists there.
+The common cases:
+
+- **`... using legacy local asset because no source mirror was found`** — the
+  earthquake/active-fault providers fell back to the bundled snapshot under
+  `dependencies/knowledge/`. To use fresher data, sync a source mirror (above) or
+  pass `provider_options={"<provider>": {"source_mode": "live"}}`.
+- **`GEM active-fault coverage has a documented coarse gap ...`** /
+  **`No GEM active-fault features intersected the bounds ...`** — the GEM Global
+  Active Faults source is sparse in some regions (e.g. the Canadian Shield). An
+  empty fault result there reflects source coverage, not absence, and is expected.
+- **`Query falls outside the <region> coverage of '<source>'`** — the
+  explicit-only `mineral_occurrences` provider is live and federated over
+  region-scoped sources (OGS Ontario, SIGÉOM Quebec); requesting it queries those
+  services over HTTP. A sub-source whose coverage region excludes the query bounds
+  is skipped with this warning, while in-coverage sub-sources still return records.
+
+Source coverage is an evolving area; treat these warnings as provenance signals,
+not failures.
+
 ## MCP Agent Surface
 
 Install the lightweight MCP adapter and run the local stdio server:
